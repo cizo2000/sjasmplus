@@ -46,7 +46,7 @@ aint detect_ram_start(unsigned char* ram, aint length);
 int TAP_SaveEmpty(char* fname) {
 	FILE* ff;
 	if (!FOPEN_ISOK(ff, fname, "wb")) {
-		Error("Error opening file", fname, CATCHALL); return 0;
+		Error("Error opening file", fname, IF_FIRST); return 0;
 	}
 	fclose(ff);
 	return 1;
@@ -71,7 +71,7 @@ int TAP_SaveBlock(char* fname, unsigned char flag, const char *ftapname, int sta
 			if (param2 < 0) {
 				param2 = defaultValue; // no autostart
 			} else if (param2 >= 16384 && param2 != defaultValue) {
-				Error("[SAVETAP] Autostart LINE out of range", 0);
+				ErrorInt("[SAVETAP] Autostart LINE out of range", param2);
 			}
 			if (param3 < 0) {
 				param3 = length;
@@ -86,7 +86,7 @@ int TAP_SaveBlock(char* fname, unsigned char flag, const char *ftapname, int sta
 			}
 			param2 &= 0x1F;
 			if (param2 < 1 || param2 > 26) { // A..Z
-				Error("[SAVETAP] Variable name out of range", 0);
+				Error("[SAVETAP] Variable name out of range");
 			}
 			param2 = (param2 | varBase) << 8;
 			param3 = defaultValue;
@@ -221,7 +221,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		aint ram_start = 0x0000;
 		unsigned char* ram = (unsigned char*)malloc(ram_length);
 		if (ram == NULL) {
-			Error("No enough memory", 0, FATAL);
+			Error("No enough memory", NULL, FATAL);
 		}
 		memcpy(ram, (unsigned char*)Device->GetSlot(1)->Page->RAM + 0x1E00, 0x2200);
 		memcpy(ram + 0x2200, (unsigned char*)Device->GetSlot(2)->Page->RAM, 0x4000);
@@ -240,7 +240,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		unsigned char *loader = new unsigned char[SaveTAP_ZX_Spectrum_48K_SZ];
 		memcpy(loader, (char*)&SaveTAP_ZX_Spectrum_48K[0], SaveTAP_ZX_Spectrum_48K_SZ);
 		if (loader == NULL) {
-			Error("No enough memory!", 0, FATAL);
+			Error("No enough memory!", NULL, FATAL);
 		}
 		// Settings.LoadScreen
 		loader[SaveTAP_ZX_Spectrum_48K_SZ - 7] = char(has_screen_changes());
@@ -260,7 +260,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		// write code block
 		writecode(ram + ram_start, ram_length, 0x5E00 + ram_start, false, fpout);
 
-		delete[] ram;
+		free(ram);
 	} else {
 		detect_vars_changes();
 
@@ -268,7 +268,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		aint ram_length = 0x6200, ram_start = 0x0000;
 		unsigned char* ram = (unsigned char*)malloc(ram_length);
 		if (ram == NULL) {
-			Error("No enough memory", 0, FATAL);
+			Error("No enough memory", NULL, FATAL);
 		}
 		memcpy(ram, (unsigned char*)Device->GetSlot(1)->Page->RAM + 0x1E00, 0x2200);
 		memcpy(ram + 0x2200, (unsigned char*)Device->GetSlot(2)->Page->RAM, 0x4000);
@@ -291,7 +291,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		unsigned char *loader = new unsigned char[loader_len];
 		memcpy(loader, loader_code, loader_defsize);
 		if (loader == NULL) {
-			Error("No enough memory!", 0, FATAL);
+			Error("No enough memory!", NULL, FATAL);
 		}
 		// Settings.Start
 		loader[loader_defsize - 8] = char(start & 0x00FF);
@@ -354,7 +354,7 @@ int TAP_SaveSnapshot(char* fname, unsigned short start) {
 		// write main code block
 		writecode(ram + ram_start, ram_length, 0x5E00 + ram_start, false, fpout);
 
-		delete[] ram;
+		free(ram);
 	}
 
 	fclose(fpout);
@@ -458,7 +458,7 @@ void detect_vars_changes() {
 	}
 
 	if (nosys && nobas48) {
-		Warning("[SAVETAP] Tape file will not contains data from 0x5B00 to 0x5E00", NULL, LASTPASS);
+		Warning("[SAVETAP] Tape file will not contains data from 0x5B00 to 0x5E00");
 	}
 }
 

@@ -29,11 +29,12 @@
 // parser.h
 
 int ParseExpression(char*& lp, aint& val);
-int ParseDirective(bool bol = 0);
+int ParseExpressionNoSyntaxError(char*& lp, aint& val);
+void ParseAlignArguments(char* & src, aint & alignment, aint & fill);
+int ParseDirective(bool beginningOfLine = 0);
 int ParseDirective_REPT();
 void ParseInstruction();
 char* ReplaceDefine(char* lp);
-char* ReplaceDefineNext(char* lp);
 void ParseLine(bool = true);
 void ParseLineSafe(bool = true);
 void ParseStructLine(CStructure* st);

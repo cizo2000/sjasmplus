@@ -33,7 +33,10 @@ using std::endl;
 
 enum EStructureMembers { SMEMBUNKNOWN, SMEMBALIGN, SMEMBBYTE, SMEMBWORD, SMEMBBLOCK, SMEMBDWORD, SMEMBD24, SMEMBPARENOPEN, SMEMBPARENCLOSE };
 
-char* ValidateLabel(char*, int);
+// bit flags for ValidateLabel
+constexpr int VALIDATE_LABEL_SET_NAMESPACE = 0x01;
+constexpr int VALIDATE_LABEL_AS_GLOBAL = 0x02;
+char* ValidateLabel(char* naam, int flags);
 extern char* PreviousIsLabel;
 int GetLabelValue(char*& p, aint& val);
 int GetLocalLabelValue(char*& op, aint& val);
@@ -46,6 +49,7 @@ public:
 	unsigned char forwardref;
 	aint value;
 	char used;
+	int updatePass;	// last updated in pass
 	CLabelTableEntry();
 };
 
@@ -80,7 +84,7 @@ public:
 	int Insert(const char*, void(*) (void));
 	int insertd(const char*, void(*) (void));
 	/*int zoek(char*);*/
-	int zoek(const char*, bool =0);
+	int zoek(const char*);
 	int Find(char*);
 private:
 	int HashTable[LABTABSIZE], NextLocation;
@@ -90,19 +94,23 @@ private:
 
 class CLocalLabelTableEntry {
 public:
-	aint regel, nummer, value;
+	aint nummer, value;
 	CLocalLabelTableEntry* next, * prev;
-	CLocalLabelTableEntry(aint, aint, CLocalLabelTableEntry*);
+	CLocalLabelTableEntry(long int number, long int address, CLocalLabelTableEntry* previous);
 };
 
 class CLocalLabelTable {
 public:
 	CLocalLabelTable();
-	aint zoekf(aint);
-	aint zoekb(aint);
-	void Insert(aint, aint);
+	~CLocalLabelTable();
+	void InitPass();
+	aint seekForward(const aint labelNumber) const;
+	aint seekBack(const aint labelNumber) const;
+	bool InsertRefresh(const aint labelNumber);
 private:
-	CLocalLabelTableEntry* first, * last;
+	bool insertImpl(const aint labelNumber);
+	bool refreshImpl(const aint labelNumber);
+	CLocalLabelTableEntry* first, * last, * refresh;
 };
 
 class CAddressList {
@@ -124,13 +132,17 @@ class CStringsList {
 public:
 	char* string;
 	CStringsList* next;
+	int sourceLine;
 	CStringsList() {
-		next = 0;
+		string = NULL;
+		next = NULL;
+		sourceLine = 0;
 	}
 	~CStringsList() {
+		if (string) free(string);
 		if (next) delete next;
 	}
-	CStringsList(char*, CStringsList*);
+	CStringsList(const char* stringSource, CStringsList* next = NULL);
 };
 
 class CDefineTableEntry {
@@ -177,6 +189,7 @@ public:
 	char* Get(const char*);
 	int FindDuplicate(const char*);
 	int Replace(const char*, const char*);
+	int Replace(const char*, const int);
 	int Remove(const char*);
 	void RemoveAll();
 	CDefineTable() {
@@ -223,7 +236,8 @@ public:
 	aint offset, len, def;
 	EStructureMembers type;
 	CStructureEntry2* next;
-	CStructureEntry2(aint, aint, aint, EStructureMembers);
+	CStructureEntry2(aint noffset, aint nlen, aint ndef, EStructureMembers ntype);
+	aint ParseValue(char* & p);
 };
 
 class CStructure {
@@ -231,6 +245,7 @@ public:
 	char* naam, * id;
 	int binding;
 	int global;
+	int maxAlignment;
 	aint noffset;
 	void AddLabel(char*);
 	void AddMember(CStructureEntry2*);
@@ -264,47 +279,20 @@ private:
 
 struct SRepeatStack {
 	int RepeatCount;
-	long CurrentGlobalLine;
-	long CurrentLocalLine;
-	long CurrentLine;
+	long CurrentSourceLine;
 	CStringsList* Lines;
 	CStringsList* Pointer;
 	bool IsInWork;
 	int Level;
-	char* lp;
 };
 
 struct SConditionalStack {
-	long CurrentGlobalLine;
-	long CurrentLocalLine;
-	long CurrentLine;
+	long CurrentSourceLine;
 	CStringsList* Lines;
 	CStringsList* Pointer;
 	bool IsInWork;
 	int Level;
-	char* lp;
 };
-
-/*
-class LabelTable2entrycls {
-public:
-  char *name;
-  aint value;
-  CLabelTableEntry();
-};
-
-
-class LabelTable2cls {
-public:
-  LabelTable2cls();
-  int replace(char*,aint);
-  int count=0;
-private:
-  int HashTable[LABTABSIZE],NextLocation;
-  LabelTable2entrycls LabelTable[LABTABSIZE];
-  int Hash(char*);
-};
-*/
 
 class CDevicePage {
 public:
@@ -339,10 +327,10 @@ public:
 	CDeviceSlot* GetSlot(aint);
 	char* ID;
 	CDevice* Next;
-	aint CurrentSlot;
-	aint CurrentPage;
-	aint SlotsCount;
-	aint PagesCount;
+	int CurrentSlot;
+	int CurrentPage;
+	int SlotsCount;
+	int PagesCount;
 private:
 	CDeviceSlot* Slots[256];
 	CDevicePage* Pages[256];

@@ -30,17 +30,6 @@
 
 #include "sjdefs.h"
 
-// http://legacy.imatix.com/html/sfl/sfl282.htm
-char* strpad(char* string, char ch, aint length) {
-	aint cursize;
-	cursize = strlen (string);          /*  Get current length of string     */
-	while (cursize < length)            /*  Pad until at desired length      */
-		string [cursize++] = ch;
-
-	string [cursize++] = '\0';          /*  Add terminating null             */
-	return (string);                    /*    and return to caller           */
-}
-
 #if !defined (_MSC_VER)
 
 void GetCurrentDirectory(int whatever, char* pad) {
@@ -49,69 +38,24 @@ void GetCurrentDirectory(int whatever, char* pad) {
 
 int SearchPath(char* oudzp, char* filename, char* whatever, int maxlen, char* nieuwzp, char** ach) {
 	FILE* fp;
-	char* p, * f;
 	if (filename[0] == '/') {
 		STRCPY(nieuwzp, maxlen, filename);
 	} else {
 		STRCPY(nieuwzp, maxlen, oudzp);
-		if (*nieuwzp && nieuwzp[strlen(nieuwzp)] != '/') {
-			STRCAT(nieuwzp, maxlen, "/");
-		}
+		if (*nieuwzp && nieuwzp[strlen(nieuwzp)-1] != '/') STRCAT(nieuwzp, maxlen, "/");
 		STRCAT(nieuwzp, maxlen, filename);
 	}
 	if (ach) {
-		p = f = nieuwzp;
+		char* p = *ach = nieuwzp;
 		while (*p) {
-			if (*p == '/') {
-				f = p + 1;
-			} ++p;
+			if (*p++ == '/') *ach = p;
 		}
-		*ach = f;
 	}
 	if (FOPEN_ISOK(fp, nieuwzp, "r")) {
 		fclose(fp);
 		return 1;
 	}
 	return 0;
-}
-
-char* strset(char* str, char val) {
-	//non-aligned
-	char* pByte = str;
-// mborik: fix for older compilers
-#ifdef _UINTPTR_T_DEFINED
-	while (((uintptr_t) pByte) & 3) {
-#else
-	while (((unsigned long) pByte) & 3) {
-#endif
-		if (*pByte) {
-			*pByte++ = val;
-		} else {
-			return str;
-		}
-	}
-
-	//4-byte aligned
-	unsigned long* pBlock = (unsigned long*) pByte;
-	unsigned long a;
-	unsigned long dwVal = val | val << 8 | val << 16 | val << 24;
-	for (; ;) {
-		a = *pBlock;
-		a &= 0x7f7f7f7f;
-		a -= 0x01010101;
-		if (a & 0x80808080) {
-			break;
-		} else {
-			*pBlock++ = dwVal;
-		}
-	}
-
-	//non-aligned
-	pByte = (char*) pBlock;
-	while (*pByte) {
-		*pByte++ = val;
-	}
-	return str;
 }
 
 #ifndef WIN32
@@ -132,7 +76,7 @@ void LuaShellExec(char *command) {
 #else
 	int ret = system(command);
 	if ( ret == -1 ) {
-		Error("[LUASHELEXEC] Unable to start child process for command", command, CATCHALL);
+		Error("[LUASHELEXEC] Unable to start child process for command", command, IF_FIRST);
 	}
 #endif
 }

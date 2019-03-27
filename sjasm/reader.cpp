@@ -30,84 +30,54 @@
 
 #include "sjdefs.h"
 
+//enum EDelimiterType          { DT_NONE, DT_QUOTES, DT_APOSTROPHE, DT_ANGLE, DT_COUNT };
+static const char delimiters_b[] = { ' ',    '"',       '\'',          '<',      0 };
+static const char delimiters_e[] = { ' ',    '"',       '\'',          '>',      0 };
+static const std::array<EDelimiterType, 3> delimiters_all = {DT_QUOTES, DT_APOSTROPHE, DT_ANGLE};
+static const std::array<EDelimiterType, 3> delimiters_noAngle = {DT_QUOTES, DT_APOSTROPHE, DT_COUNT};
+
 int cmphstr(char*& p1, const char* p2) {
 	unsigned int i = 0;
-	/* old:
-	if (isupper(*p1))
-	  while (p2[i]) {
-		if (p1[i]!=toupper(p2[i])) return 0;
-		++i;
-	  }
-	else
-	  while (p2[i]) {
-		if (p1[i]!=p2[i]) return 0;
-		++i;
-	  }*/
-	/* (begin) */
-	unsigned int v = 0;
-	if (strlen(p1) >= strlen(p2)) {
-		if (isupper(*p1)) {
-			while (p2[i]) {
-				if (p1[i] != toupper(p2[i])) {
-					v = 0;
-				} else {
-					++v;
-				}
-				++i;
-			}
-			if (strlen(p2) != v) {
-				return 0;
-			}
-		} else {
-			while (p2[i]) {
-				if (p1[i] != p2[i]) {
-					v = 0;
-				} else {
-					++v;
-				}
-				++i;
-			}
-			if (strlen(p2) != v) {
-				return 0;
-			}
+	if (isupper(*p1)) {
+		while (p2[i]) {
+			if (p1[i] != toupper(p2[i])) return 0;
+			++i;
 		}
-		/* (end) */
-
-		if (i <= strlen(p1) && p1[i] > ' '/* && p1[i]!=':'*/) {
-			return 0;
-		}
-		p1 += i;
-		return 1;
 	} else {
-		return 0;
+		while (p2[i]) {
+			if (p1[i] != p2[i]) return 0;
+			++i;
+		}
 	}
+	if (p1[i] && !White(p1[i])) return 0;		// any character above space means "no match"
+	// space, tab, enter, \0, ... => "match"
+	p1 += i;
+	return 1;
 }
 
-int White() {
-	return (*lp && *lp <= ' ');
+bool White(const char c) {
+	return c && (c&255) <= ' ';
+}
+
+bool White() {
+	return White(*lp);
+}
+
+int SkipBlanks(char*& p) {
+	while (White(*p)) ++p;
+	return (*p == 0);
 }
 
 int SkipBlanks() {
-	while (*lp && *lp <= ' ') {
-		++lp;
-	}
-	return (*lp == 0);
-}
-
-void SkipBlanks(char*& p) {
-	while (*p && *p <= ' ') {
-		++p;
-	}
+	return SkipBlanks(lp);
 }
 
 void SkipParam(char*& p) {
-	SkipBlanks(p);
-	if (!(*p)) {
-		return;
-	}
-	while (((*p) != '\0') && ((*p) != ',')) {
-		p++;
-	}
+	while (*p && (*p != ',')) ++p;
+}
+
+void SkipToEol(char*& p) {
+	while (*p) ++p;
 }
 
 int NeedEQU() {
@@ -160,16 +130,42 @@ int NeedField() {
 
 int comma(char*& p) {
 	SkipBlanks(p);
-	if (*p != ',') {
-		return 0;
+	if (*p != ',') return 0;
+	++p;
+	return 1;
+}
+
+//enum EBracketType          { BT_NONE, BT_ROUND, BT_CURLY, BT_SQUARE, BT_COUNT };
+static const char brackets_b[] = { 0,      '(',      '{',      '[',       0 };
+static const char brackets_e[] = { 0,      ')',      '}',      ']',       0 };
+static int expectedAddressClosingBracket = -1;
+
+// memory-address bracket opener (only "(" and "[" types supported)
+EBracketType OpenBracket(char*& p) {
+	SkipBlanks(p);
+	for (const EBracketType bt : {BT_ROUND, BT_SQUARE}) {
+		if (brackets_b[bt] == *p) {
+			expectedAddressClosingBracket = brackets_e[bt];
+			++p;
+			return bt;
+		}
 	}
-	++p; return 1;
+	expectedAddressClosingBracket = -1;
+	return BT_NONE;
+}
+
+int CloseBracket(char*& p) {
+	SkipBlanks(p);
+	if (*p != expectedAddressClosingBracket) return 0;
+	expectedAddressClosingBracket = -1;
+	++p;
+	return 1;
 }
 
 int cpc = '4';
 
 /* not modified */
-int oparen(char*& p, char c) {
+int oparenOLD(char*& p, char c) {
 	SkipBlanks(p);
 	if (*p != c) {
 		return 0;
@@ -186,7 +182,7 @@ int oparen(char*& p, char c) {
 	++p; return 1;
 }
 
-int cparen(char*& p) {
+int cparenOLD(char*& p) {
 	SkipBlanks(p);
 	if (*p != cpc) {
 		return 0;
@@ -258,8 +254,8 @@ char* getinstr(char*& p) {
 int check8(aint val, bool error) {
 	if ((val < -256 || val > 255) && error) {
 		char buffer[32];
-		sprintf(buffer, "Bytes lost (0x%lX)", val);
-		Warning(buffer, 0, LASTPASS);
+		sprintf(buffer, "Bytes lost (0x%lX)", val&0xFFFFFFFFUL);
+		Warning(buffer);
 		return 0;
 	}
 	return 1;
@@ -269,7 +265,7 @@ int check8o(long val) {
 	if (val < -128 || val > 127) {
 		char buffer[32];
 		sprintf(buffer,"Offset out of range (%+li)", val);
-		Error(buffer, 0, LASTPASS);
+		Error(buffer);
 		return 0;
 	}
 	return 1;
@@ -278,8 +274,8 @@ int check8o(long val) {
 int check16(aint val, bool error) {
 	if ((val < -65536 || val > 65535) && error) {
 		char buffer[32];
-		sprintf(buffer, "Bytes lost (0x%lX)", val);
-		Warning(buffer, 0, LASTPASS);
+		sprintf(buffer, "Bytes lost (0x%lX)", val&0xFFFFFFFFUL);
+		Warning(buffer);
 		return 0;
 	}
 	return 1;
@@ -288,8 +284,8 @@ int check16(aint val, bool error) {
 int check24(aint val, bool error) {
 	if ((val < -16777216 || val > 16777215) && error) {
 		char buffer[32];
-		sprintf(buffer, "Bytes lost (0x%lX)", val);
-		Warning(buffer, 0, LASTPASS);
+		sprintf(buffer, "Bytes lost (0x%lX)", val&0xFFFFFFFFUL);
+		Warning(buffer);
 		return 0;
 	}
 	return 1;
@@ -365,138 +361,136 @@ int getval(int p) {
 	}
 }
 
-int GetConstant(char*& op, aint& val) {
-	aint base,pb = 1,v,oval;
-	char* p = op,* p2,* p3;
+const char* getNumericValueLastErr = NULL;
+const char* const getNumericValueErr_syntax = "Syntax error";
+const char* const getNumericValueErr_digit = "Digit not in base";
+const char* const getNumericValueErr_no_digit = "Missing next digit";
+const char* const getNumericValueErr_overflow = "Overflow";
 
-	SkipBlanks(p);
-
-	p3 = p;
-	val = 0;
-
-	switch (*p) {
-	case '#':
-	case '$':
-		++p;
-		while (isalnum((unsigned char) * p)) {
-			if ((v = getval(*p)) >= 16) {
-				Error("Digit not in base", op);
-				return 0;
-			}
-			oval = val;
-			val = val * 16 + v;
-			++p;
-			if (oval > val) {
-				Error("Overflow", 0, SUPPRESS);
-			}
-		}
-
-		if (p - p3 < 2) {
-			Error("Syntax error", op, CATCHALL);
-			return 0;
-		}
-
-		op = p;
-
-		return 1;
-	case '%':
-		++p;
-		while (isdigit((unsigned char) * p)) {
-			if ((v = getval(*p)) >= 2) {
-				Error("Digit not in base", op);
-				return 0;
-			}
-			oval = val; val = val * 2 + v; ++p;
-			if (oval > val) {
-				Error("Overflow", 0, SUPPRESS);
-			}
-		}
-		if (p - p3 < 2) {
-			Error("Syntax error", op, CATCHALL);
-			return 0;
-		}
-
-		op = p;
-
-		return 1;
-	case '0':
-		++p;
-		if (*p == 'x' || *p == 'X') {
-			++p;
-			while (isalnum((unsigned char) * p)) {
-				if ((v = getval(*p)) >= 16) {
-					Error("Digit not in base", op);
-					return 0;
-				}
-				oval = val; val = val * 16 + v; ++p;
-				if (oval > val) {
-					Error("Overflow", 0, SUPPRESS);
-				}
-			}
-			if (p - p3 < 3) {
-				Error("Syntax error", op, CATCHALL);
-				return 0;
-			}
-
-			op = p;
-
-			return 1;
-		}
-	default:
-		while (isalnum((unsigned char) * p)) {
-			++p;
-		}
-		p2 = p--;
-		if (isdigit((unsigned char) * p)) {
-			base = 10;
-		} else if (*p == 'b') {
-			base = 2; --p;
-		} else if (*p == 'h') {
-			base = 16; --p;
-		} else if (*p == 'B') {
-			base = 2; --p;
-		} else if (*p == 'H') {
-			base = 16; --p;
-		} else if (*p == 'o') {
-			base = 8; --p;
-		} else if (*p == 'q') {
-			base = 8; --p;
-		} else if (*p == 'd') {
-			base = 10; --p;
-		} else if (*p == 'O') {
-			base = 8; --p;
-		} else if (*p == 'Q') {
-			base = 8; --p;
-		} else if (*p == 'D') {
-			base = 10; --p;
-		} else {
-			return 0;
-		}
-		do {
-			if ((v = getval(*p)) >= base) {
-				Error("Digit not in base", op); return 0;
-			}
-			oval = val; val += v * pb; if (oval > val) {
-									   	Error("Overflow", 0, SUPPRESS);
-									   }
-			pb *= base;
-		} while (p-- != p3);
-
-		op = p2;
-
-		return 1;
-	}
+bool GetNumericValue_ProcessLastError(const char* const srcLine) {
+	if (NULL == getNumericValueLastErr) return false;
+	Error(getNumericValueLastErr, srcLine, SUPPRESS);
+	// Overflow type error lets assembler to emit truncated machine code (return "false" here)
+	return (getNumericValueErr_overflow != getNumericValueLastErr);
 }
 
-int GetCharConstChar(char*& op, aint& val) {
-	if ((val = *op++) != '\\') {
-		return 1;
+bool GetNumericValue_TwoBased(char*& p, const char* const pend, aint& val, const int shiftBase) {
+	if (shiftBase < 1 || 5 < shiftBase) Error("Internal error, wrong base", NULL, FATAL);
+	getNumericValueLastErr = NULL;
+	val = 0;
+	if (pend <= p) {		// no actual digits between format specifiers
+		getNumericValueLastErr = getNumericValueErr_syntax;
+		return false;
 	}
+	aint digit;
+	const int base = 1<<shiftBase;
+	const aint overflowMask = (~0UL)<<(32-shiftBase);
+	while (p < pend) {
+		if (0 == *p || !isalnum(*p)) {
+			getNumericValueLastErr = getNumericValueErr_no_digit;
+			break;
+		}
+		if (base <= (digit = getval(*p))) {
+			getNumericValueLastErr = getNumericValueErr_digit;
+			break;
+		}
+		if (val & overflowMask) getNumericValueLastErr = getNumericValueErr_overflow;
+		val = (val<<shiftBase) + digit;
+		++p;
+	}
+	val &= 0xFFFFFFFFUL;
+	return (NULL == getNumericValueLastErr);
+}
+
+bool GetNumericValue_IntBased(char*& p, const char* const pend, aint& val, const int base) {
+	if (base < 2 || 36 < base) Error("Internal error, wrong base", NULL, FATAL);
+	getNumericValueLastErr = NULL;
+	val = 0;
+	if (pend <= p) {		// no actual digits between format specifiers
+		getNumericValueLastErr = getNumericValueErr_syntax;
+		return false;
+	}
+	aint digit;
+	while (p < pend) {
+		if (0 == *p || !isalnum(*p)) {
+			getNumericValueLastErr = getNumericValueErr_no_digit;
+			break;
+		}
+		if (base <= (digit = getval(*p))) {
+			getNumericValueLastErr = getNumericValueErr_digit;
+			break;
+		}
+		const unsigned long oval = static_cast<unsigned long>(val)&0xFFFFFFFFUL;
+		val = (val * base) + digit;
+		if (static_cast<unsigned long>(val&0xFFFFFFFFUL) < oval) getNumericValueLastErr = getNumericValueErr_overflow;
+		++p;
+	}
+	val &= 0xFFFFFFFFUL;
+	return (NULL == getNumericValueLastErr);
+}
+
+// parses number literals, forces result to be confined into 32b (even on 64b platforms,
+// to have stable results in listings/tests across platforms).
+int GetConstant(char*& op, aint& val) {
+#ifndef NDEBUG
+	// the input string has been already detected as numeric literal by ParseExpPrim (assert)
+	if (!isdigit(*op) && '#' != *op && '$' != *op && '%' != *op) ExitASM(32);
+#endif
+	// check if the format is defined by prefix (#, $, %, 0x, 0X)
+	char* p = op;
+	int shiftBase = 0, base = 0;
+	if ('#' == *p || '$' == *p) {
+		shiftBase = 4;
+		++p;
+	} else if ('0' == p[0] && 'x' == (p[1]|0x20)) {
+		shiftBase = 4;
+		p += 2;
+	} else if ('%' == *p) {
+		shiftBase = 1;
+		++p;
+	}
+	// find end of the numeric literal (pointer is beyond last alfa/digit character
+	char* pend = p;
+	while (isalnum(*pend)) ++pend;
+	char* const hardEnd = pend;
+	// if the base is still undecided, check for suffix format specifier
+	if (0 == shiftBase) {
+		switch (pend[-1]|0x20) {
+			case 'h': --pend; shiftBase = 4;  break;
+			case 'q': --pend; shiftBase = 3;  break;
+			case 'o': --pend; shiftBase = 3;  break;
+			case 'b': --pend; shiftBase = 1;  break;
+			case 'd': --pend;      base = 10; break;
+			default:
+				base = 10;
+				break;
+		}
+	}
+	// parse the number into value
+	if (0 < shiftBase) {
+		if (!GetNumericValue_TwoBased(p, pend, val, shiftBase) && GetNumericValue_ProcessLastError(op))
+			return 0;
+	} else {
+		if (!GetNumericValue_IntBased(p, pend, val, base) && GetNumericValue_ProcessLastError(op))
+			return 0;
+	}
+	op = hardEnd;
+	val &= 0xFFFFFFFFUL;
+	return 1;
+}
+
+// parse single character of double-quoted string (backslash does escape characters)
+int GetCharConstInDoubleQuotes(char*& op, aint& val) {
+	if ('"' == *op || !*op) return 0;		// closing quotes or no more characters, return 0
+	if ((val = *op++) != '\\') return 1;	// un-escaped character, just return it
 	switch (val = *op++) {
 	case '\\':
 	case '\'':
 	case '\"':
 	case '\?':
+		return 1;
+	case '0':
+		val = 0;
 		return 1;
 	case 'n':
 	case 'N':
@@ -535,114 +529,186 @@ int GetCharConstChar(char*& op, aint& val) {
 		val = 127;
 		return 1;
 	default:
-		--op;
-		val = '\\';
-
-		Error("Unknown escape", op);
-
-		return 1;
+		break;
 	}
-	return 0;
-}
-
-int GetCharConstCharSingle(char*& op, aint& val) {
-	if ((val = *op++) != '\\') {
-		return 1;
-	}
-	switch (val = *op++) {
-	case '\'':
-		return 1;
-	}
-	--op; val = '\\';
+	// keep "val" equal to the second character
+	Error("Unknown escape", op-2);
 	return 1;
 }
 
+// parse single character of apostrophe-quoted string (no escaping, double '' is apostrophe itself)
+int GetCharConstInApostrophes(char*& op, aint& val) {
+	if ('\'' == op[0] && '\'' == op[1]) {	// '' converts to actual apostrophe as value
+		val = '\'';
+		op += 2;
+		return 1;
+	}
+	if ('\'' == *op || !*op) return 0;		// closing apostrophe or no more characters, return 0
+	// normal character, just return it
+	val = *op++;
+	return 1;
+}
+
+// parse single/double quoted string literal as single value ('012' == 0x00303132)
 int GetCharConst(char*& p, aint& val) {
-	aint s = 24,r,t = 0; val = 0;
-	char* op = p,q;
-	if (*p != '\'' && *p != '"') {
-		return 0;
+	const char * const op = p;		// for error reporting
+	char buffer[128];
+	int bytes = 0, strRes;
+	if (!(strRes = GetCharConstAsString(p, buffer, bytes))) return 0;		// no string detected
+	val = 0;
+	if (-1 == strRes) return 0;		// some syntax/max_size error happened
+	for (int ii = 0; ii < bytes; ++ii) val = (val << 8) + (255&buffer[ii]);
+	if (0 == bytes) {
+		Warning("Empty string literal converted to value 0!", op);
+	} else if (4 < bytes) {
+		val &= 0xFFFFFFFFUL;		// make sure it's 32b truncated even on 64b platforms
+		const char oldCh = *p;
+		*p = 0;						// shorten the string literal for warning display
+		sprintf(buffer, "String literal truncated to 0x%lX", val);
+		Warning(buffer, op);
+		*p = oldCh;					// restore it
 	}
-	q = *p++;
-	do {
-		if (!*p || *p == q) {
-			p = op; return 0;
-		}
-		GetCharConstChar(p, r);
-		val += r << s; s -= 8; ++t;
-	} while (*p != q);
-	if (t > 4) {
-		Error("Overflow", 0, SUPPRESS);
-	}
-	val = val >> (s + 8);
-	++p;
 	return 1;
 }
+
+// returns (adjusts also "p" and "ei", and fills "e"):
+//  -1 = syntax error (or buffer full)
+//   0 = no string literal detected at p[0]
+//   1 = string literal in single quotes (apostrophe)
+//   2 = string literal in double quotes (")
+template <class strT> int GetCharConstAsString(char* & p, strT e[], int & ei, int max_ei, int add) {
+	if ('"' != *p && '\'' != *p) return 0;
+	const char* const elementP = p;
+	const bool quotes = ('"' == *p++);
+	aint val;
+	while (ei < max_ei && (quotes ? GetCharConstInDoubleQuotes(p, val) : GetCharConstInApostrophes(p, val))) {
+		e[ei++] = (val + add) & 255;
+	}
+	if ((quotes ? '"' : '\'') != *p) {	// too many/invalid arguments or zero-terminator can lead to this
+		if (!*p) Error("Syntax error", elementP, SUPPRESS);
+		return -1;
+	}
+	++p;
+	return 1 + quotes;
+}
+
+// make sure both specialized instances for `char` and `int` are available for whole app
+template int GetCharConstAsString<char>(char* & p, char e[], int & ei, int max_ei, int add);
+template int GetCharConstAsString<int>(char* & p, int e[], int & ei, int max_ei, int add);
 
 int GetBytes(char*& p, int e[], int add, int dc) {
 	aint val;
-	int t = 0;
-	while ('o') {
-		SkipBlanks(p);
-		if (!*p) {
-			Error("Expression expected", 0, SUPPRESS); break;
-		}
-		if (t == 128) {
-			Error("Too many arguments", p, SUPPRESS); break;
-		}
-		if (*p == '"') {
-			p++;
-			do {
-				if (!*p || *p == '"') {
-					Error("Syntax error", p, SUPPRESS); e[t] = -1; return t;
+	int t = 0, strRes;
+	do {
+		const int oldT = t;
+		if (SkipBlanks(p)) {
+			Error("Expression expected", NULL, SUPPRESS);
+		} else if (0 != (strRes = GetCharConstAsString(p, e, t, 128, add))) {
+			// string literal parsed (both types)
+			if (-1 == strRes) break;
+			if (oldT == t) Warning("Empty string", p-2);
+			else {
+				// single byte "strings" may have further part of expression, handle it *here* :/
+				if (1 == t - oldT) {
+					SkipBlanks(p);
+					if (*p && ',' != *p) {
+						ParseExpression(p, val);
+						val += (e[t - 1] - add) & 255;	// restore "char" value back and add to expr.
+						check8(val);
+						e[t-1] = (val + add) & 255;
+					}
 				}
-				if (t == 128) {
-					Error("Too many arguments", p, SUPPRESS); e[t] = -1; return t;
-				}
-				GetCharConstChar(p, val); check8(val); e[t++] = (val + add) & 255;
-			} while (*p != '"');
-			++p; if (dc && t) {
-				 	e[t - 1] |= 128;
-				 }
-		} else if ((*p == 0x27) && (!*(p+2) || *(p+2) != 0x27)) {
-		  	p++;
-			do {
-				if (!*p || *p == 0x27) {
-					Error("Syntax error", p, SUPPRESS);
-					e[t] = -1;
-					return t;
-				}
-				if (t == 128) {
-		  			Error("Too many arguments", p, SUPPRESS);
-					e[t] = -1;
-					return t;
-				}
-		  		GetCharConstCharSingle(p, val);
-				check8(val);
-				e[t++] = (val + add) & 255;
-			} while (*p != 0x27);
-
-		  	++p;
-
-			if (dc && t) {
-				e[t - 1] |= 128;
+				// mark last "string" byte with |128: single char in "" *is* string
+				// but single char in '' *is not* (!) (no |128 then) => a bit complex condition :)
+				if (dc && ((1 == strRes) < (t - oldT))) e[t - 1] |= 128;
 			}
 		} else {
 			if (ParseExpression(p, val)) {
-				check8(val); e[t++] = (val + add) & 255;
+				check8(val);
+				e[t++] = (val + add) & 255;
 			} else {
 				Error("Syntax error", p, SUPPRESS);
 				break;
 			}
 		}
-		SkipBlanks(p);
-		if (*p != ',') {
-			break;
-		}
-		++p;
-	}
+	} while(comma(p) && t < 128);
 	e[t] = -1;
+	if (t == 128 && *p) Error("Too many arguments", p, SUPPRESS);
 	return t;
+}
+
+int GetBits(char*& p, int e[]) {
+	EDelimiterType dt = DelimiterBegins(p, delimiters_noAngle);	//also skip blanks
+	static int one = 0;		// the warning about multi-chars should be emitted only once per pass
+	static bool zeroInDgWarning = false;
+	int bytes = 0;
+	while (*p && (dt == DT_NONE || delimiters_e[dt] != *p)) {
+		// collect whole byte (eight bits)
+		int value = 1, pch;
+		while (value < 256 && *p && (pch = 255 & (*p++))) {
+			if (White(pch)) continue;		// skip spaces
+			value <<= 1;
+			if ('-' == pch || '.' == pch || '_' == pch) continue;
+			value |= 1;
+			if (LASTPASS != pass) continue;
+			if (0 < one && one != pch) {
+				Warning("[DG] multiple characters used for 'ones'");
+				one = -1;					// emit this warning only once
+			} else if (!one) one = pch;		// remember char used first time for "ones"
+			if ('0' == pch && !zeroInDgWarning) {
+				zeroInDgWarning = true;
+				Warning("[DG] character '0' in DG works as value 1");
+			}
+		}
+		if (value < 256) {		// there was not eight characters, ended prematurely
+			Error("[DG] byte needs eight characters", substitutedLine, SUPPRESS);
+		} else {
+			if (128 <= bytes) {
+				Error("Too many arguments", p, SUPPRESS);
+				break;
+			}
+			e[bytes++] = value & 255;
+		}
+		SkipBlanks(p);
+	}
+	if (0 < one) one = 0;		// reset "ones" type if everything was OK this time
+	e[bytes] = -1;
+	if (dt == DT_NONE) return bytes;
+	if (delimiters_e[dt] != *p)	Error("No closing delimiter", NULL, SUPPRESS);
+	else 						++p;
+	return bytes;
+}
+
+int GetBytesHexaText(char*& p, int e[]) {
+	const char* const op_full = p;
+	int bytes = 0;
+	do {
+		EDelimiterType dt = DelimiterBegins(p, delimiters_noAngle);	//also skip blanks
+		if (!*p) Error("no arguments");
+		while (*p && (dt == DT_NONE || delimiters_e[dt] != *p)) {
+			const char* const op = p;
+			// collect whole byte = two hexa digits
+			aint val;
+			if (!GetNumericValue_TwoBased(p, p+2, val, 4) && GetNumericValue_ProcessLastError(op)) {
+				return 0;		// total failure, don't emit anything
+			}
+			if (128 <= bytes) {
+				Error("Too many arguments", NULL, SUPPRESS);
+				break;
+			}
+			e[bytes++] = val & 255;
+			SkipBlanks(p);			// skip spaces
+			if (dt == DT_NONE && ',' == *p) break;	// loop through multi arguments in outer do-while loop
+		}
+		if (dt != DT_NONE) {
+			if (delimiters_e[dt] == *p)	{
+				++p;
+				SkipBlanks(p);
+			} else Error("No closing delimiter", op_full, SUPPRESS);
+		}
+	} while (comma(p));
+	e[bytes] = -1;
+	return bytes;
 }
 
 #if defined(WIN32)
@@ -654,29 +720,21 @@ static const char goodSlash = '/';
 #endif
 
 static EDelimiterType delimiterOfLastFileName = DT_NONE;
-static const char delimiters_b[] = DELIMITERS_B;
-static const char delimiters_e[] = DELIMITERS_E;
 
 char* GetFileName(char*& p, bool convertslashes) {
 	char* newFn = new char[LINEMAX];
-	if (NULL == newFn) Error("No enough memory!", 0, FATAL);
+	if (NULL == newFn) ErrorInt("No enough memory!", LINEMAX, FATAL);
 	char* result = newFn;
-	// find first non-blank character
-	SkipBlanks(p);
-	// check if some and which delimiter is used for this filename
-	int delI = DT_COUNT;
-	while (delI-- && (delimiters_b[delI] != *p)) ;
-	if (delI < 0) delI = 0;	// no delimiter found, use default "space" for end
-	else ++p;				// if found, advance over it
-	// remember type of detected delimiter (for GetDelimiterOfLastFileName function)
-	delimiterOfLastFileName = static_cast<EDelimiterType>(delI);
-	const char deliE = delimiters_e[delI];	// expected ending delimiter
+	// check if some and which delimiter is used for this filename (does advance over white chars)
+	// and remember type of detected delimiter (for GetDelimiterOfLastFileName function)
+	delimiterOfLastFileName = DelimiterAnyBegins(p);
+	const char deliE = delimiters_e[delimiterOfLastFileName];	// expected ending delimiter
 	// copy all characters until zero or delimiter-end character is reached
 	while (*p && deliE != *p) {
 		*newFn = *p;		// copy character
 		if (convertslashes && badSlash == *newFn) *newFn = goodSlash;	// convert slashes if enabled
 		++newFn, ++p;
-		if (LINEMAX <= newFn-result) Error("Filename too long!", 0, FATAL);
+		if (LINEMAX <= newFn-result) Error("Filename too long!", NULL, FATAL);
 	}
 	*newFn = 0;				// add string terminator at end of file name
 	// verify + skip end-delimiter (if other than space)
@@ -685,7 +743,7 @@ char* GetFileName(char*& p, bool convertslashes) {
 			++p;
 		} else {
 			const char delimiterTxt[2] = { deliE, 0 };
-			Error("No closing delimiter", delimiterTxt, PASS1);
+			Error("No closing delimiter", delimiterTxt, EARLY);
 		}
 	}
 	SkipBlanks(p);			// skip blanks any way
@@ -695,22 +753,6 @@ char* GetFileName(char*& p, bool convertslashes) {
 EDelimiterType GetDelimiterOfLastFileName() {
 	// DT_NONE if no GetFileName was called
 	return delimiterOfLastFileName;
-}
-
-int needcomma(char*& p) {
-	SkipBlanks(p);
-	if (*p != ',') {
-		Error("Comma expected", 0);
-	}
-	return (*(p++) == ',');
-}
-
-int needbparen(char*& p) {
-	SkipBlanks(p);
-	if (*p != ']') {
-		Error("']' expected", 0);
-	}
-	return (*(p++) == ']');
 }
 
 int islabchar(char p) {
@@ -799,58 +841,72 @@ EStructureMembers GetStructMemberId(char*& p) {
 	return SMEMBUNKNOWN;
 }
 
-int GetArray(char*& p, int e[], int add, int dc) {
-	aint val;
-	int t = 0;
-	while ('o') {
-		SkipBlanks(p);
-		if (!*p) {
-			Error("Expression expected", 0, SUPPRESS); break;
+int GetMacroArgumentValue(char* & src, char* & dst) {
+	SkipBlanks(src);
+	const char* const dstOrig = dst, * const srcOrig = src;
+	while (*src && ',' != *src) {
+		// check if there is some kind of delimiter next (string literal or angle brackets expression)
+		// the angle-bracket can only be used around whole argument (i.e. '<' must be first char)
+		EDelimiterType delI = DelimiterBegins(src, srcOrig==src ? delimiters_all : delimiters_noAngle, false);
+		if (DT_NONE == delI) {		// no delimiter found, ordinary expression, copy char by char
+			*dst++ = *src++;
+			continue;
 		}
-		if (t == 128) {
-			Error("Too many arguments", p, SUPPRESS); break;
-		}
-		if (*p == '"') {
-			p++;
-			do {
-				if (!*p || *p == '"') {
-					Error("Syntax error", p, SUPPRESS); e[t] = -1; return t;
+		// some delimiter found - parse those properly by their type
+		if (DT_ANGLE != delI) *dst++ = *src;	// quotes are part of parsed value, angles are NOT
+		++src;									// advance over delimiter
+		const char endCh = delimiters_e[delI];	// set expected ending delimiter
+		while (*src) {
+			// handle escape sequences by the type of delimiter
+			switch (delI) {
+			case DT_ANGLE:
+				if (('!' == *src && '!' == src[1]) || ('!' == *src && '>' == src[1])) {
+					*dst++ = src[1]; src += 2;	// escape sequence is converted into final char
+					continue;
 				}
-				if (t == 128) {
-					Error("Too many arguments", p, SUPPRESS); e[t] = -1; return t;
+				break;
+			case DT_QUOTES:
+				if ('\\' == *src && src[1]) {
+					*dst++ = *src++;	*dst++ = *src++;
+					continue;					// copy escape + escaped char (*any* non zero char)
 				}
-				GetCharConstChar(p, val); check8(val); e[t++] = (val + add) & 255;
-			} while (*p != '"');
-			++p; if (dc && t) {
-				 	e[t - 1] |= 128;
-				 }
-		} else if ((*p == 0x27) && (!*(p+2) || *(p+2) != 0x27)) {
-		  	p++;
-			do {
-				if (!*p || *p == 0x27) {
-					Error("Syntax error", p, SUPPRESS); e[t] = -1; return t;
+				break;
+			case DT_APOSTROPHE:
+				if ('\'' == *src && '\'' == src[1]) {
+					*dst++ = *src++;	*dst++ = *src++;
+					continue;					// copy two apostrophes (escaped apostrophe)
 				}
-				if (t == 128) {
-		  			Error("Too many arguments", p, SUPPRESS); e[t] = -1; return t;
-				}
-		  		GetCharConstCharSingle(p, val); check8(val); e[t++] = (val + add) & 255;
-			} while (*p != 0x27);
-		  	++p;
-			if (dc && t) {
-				 e[t - 1] |= 128;
+				break;
+			default:
+				break;
 			}
-		} else {
-			if (ParseExpression(p, val)) {
-				check8(val); e[t++] = (val + add) & 255;
-			} else {
-				Error("Syntax error", p, SUPPRESS); break;
-			}
+			if (endCh == *src) break;			// ending delimiter found
+			*dst++ = *src++;					// just copy character
 		}
-		SkipBlanks(p); if (*p != ',') {
-					   	break;
-					   } ++p;
+		// ending delimiter must be identical to endCh
+		if (endCh != *src) return 0;
+		// set ending delimiter for quotes and apostrophe (angles are stripped from value)
+		if (DT_QUOTES == delI || DT_APOSTROPHE == delI) *dst++ = endCh;
+		++src;									// advance over delimiter
 	}
-	e[t] = -1; return t;
+	*dst = 0;									// zero terminator of resulting string value
+	int returnValue = *dstOrig || ',' == *src;	// return 1 if value is not empty or comma follows
+	if (!*dstOrig && returnValue) Warning("[Macro argument parser] empty value", srcOrig);
+	return (returnValue);		// but empty value will at least display warning
+}
+
+EDelimiterType DelimiterBegins(char*& src, const std::array<EDelimiterType, 3> delimiters, bool advanceSrc) {
+	if (advanceSrc && SkipBlanks(src)) return DT_NONE;
+	for (const auto dt : delimiters) {
+		if (delimiters_b[dt] != *src) continue;
+		if (advanceSrc) ++src;
+		return dt;
+	}
+	return DT_NONE;
+}
+
+EDelimiterType DelimiterAnyBegins(char*& src, bool advanceSrc) {
+	return DelimiterBegins(src, delimiters_all, advanceSrc);
 }
 
 //eof reader.cpp

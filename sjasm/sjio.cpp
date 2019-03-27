@@ -34,10 +34,11 @@
 
 #define DESTBUFLEN 8192
 
+// ReadLine buffer and variables around
 char rlbuf[4096 * 2]; //x2 to prevent errors
-int RL_Readed;
-bool rldquotes = false,rlsquotes = false,rlspace = false,rlcomment = false,rlcolon = false,rlnewline = true;
-char* rlpbuf, * rlppos;
+char * rlpbuf, * rlpbuf_end, * rlppos;
+bool colonSubline;
+int blockComment;
 
 FILE* FP_UnrealList;
 
@@ -51,141 +52,91 @@ FILE* FP_Input = NULL, * FP_Output = NULL, * FP_RAW = NULL;
 FILE* FP_ListingFile = NULL,* FP_ExportFile = NULL;
 aint PreviousAddress,epadres,IsSkipErrors = 0;
 aint WBLength = 0;
-char hd[] = {
-	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'
-};
 
-void Error(const char* fout, const char* bd, int type) {
-	char* ep = ErrorLine;
-	char* count;
-	int ln;
-#ifdef USE_LUA
-	lua_Debug ar;
-#endif //USE_LUA
+void Error(const char* message, const char* badValueMessage, EStatus type) {
+	// check if it is correct pass by the type of error
+	if (type == EARLY && LASTPASS <= pass) return;
+	if ((type == SUPPRESS || type == IF_FIRST || type == PASS3) && pass < LASTPASS) return;
+	// check if this one should be skipped due to type constraints and current-error-state
+	if (FATAL != type && PreviousErrorLine == CurrentSourceLine) {
+		// non-fatal error, on the same line as previous, maybe skip?
+		if (IsSkipErrors || IF_FIRST == type) return;
+	}
+	// update current-error-state
+	if (PreviousErrorLine != CurrentSourceLine) IsSkipErrors = false;	// reset "skip" on new line
+	IsSkipErrors |= (SUPPRESS == type);		// keep it holding over the same line, raise it by SUPPRESS type
+	++ErrorCount;							// number of non-skipped (!) errors
+	PreviousErrorLine = CurrentSourceLine;
 
-	if (IsSkipErrors && PreviousErrorLine == CurrentLocalLine && type != FATAL) {
-		return;
-	}
-	if (type == CATCHALL && PreviousErrorLine == CurrentLocalLine) {
-		return;
-	}
-	if (type == PASS1 && pass != 1) {
-		return;
-	}
-	if ((type == CATCHALL || type == PASS3) && pass < 3) {
-		return;
-	}
-	if ((type == SUPPRESS || type == PASS2) && pass < 2) {
-		return;
-	}
-	IsSkipErrors = (type == SUPPRESS);
-	PreviousErrorLine = CurrentLocalLine;
-	++ErrorCount;
+	DefineTable.Replace("_ERRORS", ErrorCount);
 
-	count = new char[25];
-	SPRINTF1(count, 25, "%d", ErrorCount);
-	DefineTable.Replace("_ERRORS", count);
-
-	delete[] count;
-
-	/*SPRINTF3(ep, LINEMAX2, "%s line %lu: %s", filename, CurrentLocalLine, fout);
-	if (bd) {
-		STRCAT(ep, LINEMAX2, ": "); STRCAT(ep, LINEMAX2, bd);
-	}
-	if (!strchr(ep, '\n')) {
-		STRCAT(ep, LINEMAX2, "\n");
-	}*/
-
-	if (pass > LASTPASS) {
-		SPRINTF1(ep, LINEMAX2, "error: %s", fout);
-	} else {
+	if (1 <= pass && pass <= LASTPASS) {	// during assembling, show also file+line info
+		int ln = CurrentSourceLine;
 #ifdef USE_LUA
 		if (LuaLine >= 0) {
+			lua_Debug ar;
 			lua_getstack(LUA, 1, &ar) ;
 			lua_getinfo(LUA, "l", &ar);
 			ln = LuaLine + ar.currentline;
-		} else {
-			ln = CurrentLocalLine;
 		}
-#else
-		ln = CurrentLocalLine;
 #endif //USE_LUA
-		SPRINTF3(ep, LINEMAX2, "%s(%d): error: %s", filename, ln, fout);
+		SPRINTF2(ErrorLine, LINEMAX2, "%s(%d): ", filename, ln);
+	} else ErrorLine[0] = 0;				// reset ErrorLine for STRCAT
+	STRCAT(ErrorLine, LINEMAX2, "error: ");
+	STRCAT(ErrorLine, LINEMAX2, message);
+	if (badValueMessage) {
+		STRCAT(ErrorLine, LINEMAX2, ": "); STRCAT(ErrorLine, LINEMAX2, badValueMessage);
 	}
-
-	if (bd) {
-		STRCAT(ep, LINEMAX2, ": "); STRCAT(ep, LINEMAX2, bd);
+	if (!strchr(ErrorLine, '\n')) STRCAT(ErrorLine, LINEMAX2, "\n");	// append EOL if needed
+	// print the error into listing file always (the OutputVerbosity does not apply to listing)
+	if (GetListingFile()) fputs(ErrorLine, GetListingFile());
+	// print the error into stderr if OutputVerbosity allows errors
+	if (Options::OutputVerbosity <= OV_ERROR) {
+		_CERR ErrorLine _END;
 	}
-	if (!strchr(ep, '\n')) {
-		STRCAT(ep, LINEMAX2, "\n");
-	}
-
-	if (FP_ListingFile != NULL) {
-		fputs(ErrorLine, FP_ListingFile);
-	}
-
-	_CERR ErrorLine _END;
-
-	/*if (type==FATAL) exit(1);*/
+	// terminate whole assembler in case of fatal error
 	if (type == FATAL) {
 		ExitASM(1);
 	}
 }
 
-void Warning(const char* fout, const char* bd, int type) {
-	char* ep = ErrorLine;
-	char* count;
-	int ln;
-#ifdef USE_LUA
-	lua_Debug ar;
-#endif //USE_LUA
+void ErrorInt(const char* message, aint badValue, EStatus type) {
+	char numBuf[24];
+	SPRINTF1(numBuf, 24, "%ld", badValue);
+	Error(message, numBuf, type);
+}
 
-	if (type == PASS1 && pass != 1) {
-		return;
-	}
-	if (type == PASS2 && pass < 2) {
-		return;
-	}
-
-	count = new char[25];
-	SPRINTF1(count, 25, "%d", WarningCount);
-	DefineTable.Replace("_WARNINGS", count);
-	delete[] count;
-
-	if (type == LASTPASS && pass != 3) {
-		return;
-	}
+void Warning(const char* message, const char* badValueMessage, EWStatus type)
+{
+	// check if it is correct pass by the type of error
+	if (type == W_EARLY && LASTPASS <= pass) return;
+	if (type == W_PASS3 && pass < LASTPASS) return;
 
 	++WarningCount;
 
-	if (pass > LASTPASS) {
-		SPRINTF1(ep, LINEMAX2, "warning: %s", fout);
-	} else {
+	DefineTable.Replace("_WARNINGS", WarningCount);
+
+	if (pass <= LASTPASS) {					// during assembling, show also file+line info
+		int ln = CurrentSourceLine;
 #ifdef USE_LUA
 		if (LuaLine >= 0) {
+			lua_Debug ar;
 			lua_getstack(LUA, 1, &ar) ;
 			lua_getinfo(LUA, "l", &ar);
 			ln = LuaLine + ar.currentline;
-		} else {
-			ln = CurrentLocalLine;
 		}
-#else
-		ln = CurrentLocalLine;
 #endif //USE_LUA
-		SPRINTF3(ep, LINEMAX2, "%s(%d): warning: %s", filename, ln, fout);
+		SPRINTF2(ErrorLine, LINEMAX2, "%s(%d): ", filename, ln);
+	} else ErrorLine[0] = 0;				// reset ErrorLine for STRCAT
+	STRCAT(ErrorLine, LINEMAX2, "warning: ");
+	STRCAT(ErrorLine, LINEMAX2, message);
+	if (badValueMessage) {
+		STRCAT(ErrorLine, LINEMAX2, ": "); STRCAT(ErrorLine, LINEMAX2, badValueMessage);
 	}
-
-	if (bd) {
-		STRCAT(ep, LINEMAX2, ": ");
-		STRCAT(ep, LINEMAX2, bd);
-	}
-	if (!strchr(ep, '\n')) {
-		STRCAT(ep, LINEMAX2, "\n");
-	}
-
-	if (FP_ListingFile != NULL) {
-		fputs(ErrorLine, FP_ListingFile);
-	}
+	if (!strchr(ErrorLine, '\n')) STRCAT(ErrorLine, LINEMAX2, "\n");	// append EOL if needed
+	// print the warning into listing file always (the OutputVerbosity does not apply to listing)
+	if (GetListingFile()) fputs(ErrorLine, GetListingFile());
+	// print the warning into stderr if OutputVerbosity allows warnings
 	if (Options::OutputVerbosity <= OV_WARNING) {
 		_CERR ErrorLine _END;
 	}
@@ -197,7 +148,7 @@ void CheckRamLimitExceeded()
 	{
 		char buf[64];
 		SPRINTF2(buf, 1024, "RAM limit exceeded 0x%X by %s", (unsigned int)CurAddress, PseudoORG ? "DISP":"ORG");
-		Warning(buf, 0, LASTPASS);
+		Warning(buf);
 		CurAddress &= 0xFFFF;
 	}
 
@@ -205,7 +156,7 @@ void CheckRamLimitExceeded()
 	{
 		char buf[64];
 		SPRINTF1(buf, 1024, "RAM limit exceeded 0x%X by ORG", (unsigned int)adrdisp);
-		Warning(buf, 0, LASTPASS);
+		Warning(buf);
 		adrdisp &= 0xFFFF;
 	}
 }
@@ -216,17 +167,17 @@ void WriteDest() {
 	}
 	destlen += WBLength;
 	if (FP_Output != NULL && (aint) fwrite(WriteBuffer, 1, WBLength, FP_Output) != WBLength) {
-		Error("Write error (disk full?)", 0, FATAL);
+		Error("Write error (disk full?)", NULL, FATAL);
 	}
 	if (FP_RAW != NULL && (aint) fwrite(WriteBuffer, 1, WBLength, FP_RAW) != WBLength) {
-		Error("Write error (disk full?)", 0, FATAL);
+		Error("Write error (disk full?)", NULL, FATAL);
 	}
 
 	if (FP_tapout)
 	{
 		int write_length = tape_length + WBLength > 65535 ? 65535 - tape_length : WBLength;
 
-		if ( (aint)fwrite(WriteBuffer, 1, write_length, FP_tapout) != write_length) Error("Write error (disk full?)", 0, FATAL);
+		if ( (aint)fwrite(WriteBuffer, 1, write_length, FP_tapout) != write_length) Error("Write error (disk full?)", NULL, FATAL);
 
 		for (int i = 0; i < write_length; i++) tape_parity ^= WriteBuffer[i];
 		tape_length += write_length;
@@ -235,124 +186,34 @@ void WriteDest() {
 		{
 			WBLength = 0;
 			CloseTapFile();
-			Error("Tape block exceeds maximal size", 0);
+			Error("Tape block exceeds maximal size");
 		}
 	}
 	WBLength = 0;
 }
 
-void PrintHEX8(char*& p, aint h) {
-	aint hh = h&0xff;
-	*(p++) = hd[hh >> 4];
-	*(p++) = hd[hh & 15];
+void PrintHex(char* & dest, aint value, int nibbles) {
+	if (nibbles < 1 || 16 < nibbles) ExitASM(33);	// invalid argument
+	const char oldChAfter = dest[nibbles];
+	const aint mask = (int(sizeof(aint)*2) <= nibbles) ? ~0UL : (1UL<<(nibbles*4))-1UL;
+	if (nibbles != sprintf(dest, "%0*lX", nibbles, value&mask)) ExitASM(33);
+	dest += nibbles;
+	*dest = oldChAfter;
 }
 
-void listbytes(char*& p) {
-	int i = 0;
-	while (nEB--) {
-		PrintHEX8(p, EB[i++]); *(p++) = ' ';
-	}
-	i = 4 - i;
-	while (i--) {
-		*(p++) = ' '; *(p++) = ' '; *(p++) = ' ';
-	}
+void PrintHex32(char*& dest, aint value) {
+	PrintHex(dest, value, 8);
 }
 
-void listbytes2(char*& p) {
-	for (int i = 0; i != 5; ++i) {
-		PrintHEX8(p, EB[i]);
-	}
-	*(p++) = ' '; *(p++) = ' ';
+void PrintHexAlt(char*& dest, aint value)
+{
+	value &= 0xFFFFFFFFUL;
+	char buffer[24] = { 0 }, * bp = buffer;
+	sprintf(buffer, "%04lX", value & 0xFFFFFFFFUL);
+	while (*bp) *dest++ = *bp++;
 }
 
-void printCurrentLocalLine(char*& p) {
-	aint v = CurrentLocalLine;
-	switch (reglenwidth) {
-	default:
-		*(p++) = (unsigned char)('0' + v / 1000000); v %= 1000000;
-	case 6:
-		*(p++) = (unsigned char)('0' + v / 100000); v %= 100000;
-	case 5:
-		*(p++) = (unsigned char)('0' + v / 10000); v %= 10000;
-	case 4:
-		*(p++) = (unsigned char)('0' + v / 1000); v %= 1000;
-	case 3:
-		*(p++) = (unsigned char)('0' + v / 100); v %= 100;
-	case 2:
-		*(p++) = (unsigned char)('0' + v / 10); v %= 10;
-	case 1:
-		*(p++) = (unsigned char)('0' + v);
-	}
-	*(p++) = IncludeLevel > 0 ? '+' : ' ';
-	*(p++) = IncludeLevel > 1 ? '+' : ' ';
-	*(p++) = IncludeLevel > 2 ? '+' : ' ';
-}
-
-void PrintHEX32(char*& p, aint h) {
-	aint hh = h&0xffffffff;
-	*(p++) = hd[hh >> 28]; hh &= 0xfffffff;
-	*(p++) = hd[hh >> 24]; hh &= 0xffffff;
-	*(p++) = hd[hh >> 20]; hh &= 0xfffff;
-	*(p++) = hd[hh >> 16]; hh &= 0xffff;
-	*(p++) = hd[hh >> 12]; hh &= 0xfff;
-	*(p++) = hd[hh >> 8];  hh &= 0xff;
-	*(p++) = hd[hh >> 4];  hh &= 0xf;
-	*(p++) = hd[hh];
-}
-
-void PrintHEX16(char*& p, aint h) {
-	aint hh = h&0xffff;
-	*(p++) = hd[hh >> 12]; hh &= 0xfff;
-	*(p++) = hd[hh >> 8]; hh &= 0xff;
-	*(p++) = hd[hh >> 4]; hh &= 0xf;
-	*(p++) = hd[hh];
-}
-
-char hd2[] = {
-	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'
-};
-
-void PrintHEXAlt(char*& p, aint h) {
-	aint hh = h&0xffffffff;
-	if (hh >> 28 != 0) {
-		*(p++) = hd2[hh >> 28];
-	}
-	hh &= 0xfffffff;
-	if (hh >> 24 != 0) {
-		*(p++) = hd2[hh >> 24];
-	}
-	hh &= 0xffffff;
-	if (hh >> 20 != 0) {
-		*(p++) = hd2[hh >> 20];
-	}
-	hh &= 0xfffff;
-	if (hh >> 16 != 0) {
-		*(p++) = hd2[hh >> 16];
-	}
-	hh &= 0xffff;
-	*(p++) = hd2[hh >> 12]; hh &= 0xfff;
-	*(p++) = hd2[hh >> 8];  hh &= 0xff;
-	*(p++) = hd2[hh >> 4];  hh &= 0xf;
-	*(p++) = hd2[hh];
-}
-
-void listbytes3(int pad) {
-	int i = 0,t;
-	char* pp,* sp = pline + 3 + reglenwidth;
-	while (nEB) {
-		pp = sp;
-		PrintHEX16(pp, pad);
-		*(pp++) = ' '; t = 0;
-		while (nEB && t < 32) {
-			PrintHEX8(pp, EB[i++]); --nEB; ++t;
-		}
-		*(pp++) = '\n'; *pp = 0;
-		if (FP_ListingFile != NULL) {
-			fputs(pline, FP_ListingFile);
-		}
-		pad += 32;
-	}
-}
+static char pline[4*LINEMAX];
 
 void PrepareListLine(aint hexadd)
 {
@@ -363,156 +224,75 @@ void PrepareListLine(aint hexadd)
 
 	int digit = ' ';
 	int linewidth = reglenwidth;
-	long linenumber = CurrentLocalLine % 10000;
+	long linenumber = CurrentSourceLine % 10000;
 	if (linewidth > 5)
 	{
 		linewidth = 5;
-		digit = CurrentLocalLine / 10000 + '0';
+		digit = CurrentSourceLine / 10000 + '0';
 		if (digit > '~') digit = '~';
-		if (CurrentLocalLine >= 10000) linenumber += 10000;
+		if (CurrentSourceLine >= 10000) linenumber += 10000;
 	}
 	memset(pline, ' ', 24);
-	STRCPY(pline + 24, LINEMAX2, line);
+	if (listmacro) pline[23] = '>';
 	sprintf(pline, "%*lu", linewidth, linenumber); pline[linewidth] = ' ';
 	memcpy(pline + linewidth, "++++++", IncludeLevel > 6 - linewidth ? 6 - linewidth : IncludeLevel);
 	sprintf(pline + 6, "%04lX", hexadd & 0xFFFF); pline[10] = ' ';
 	if (digit > '0') *pline = digit & 0xFF;
+	// if substitutedLine is completely empty, list rather source line any way
+	if (!*substitutedLine) substitutedLine = line;
+	STRCPY(pline + 24, LINEMAX2-24, substitutedLine);
+	// add EOL comment if substituted was used and EOL comment is available
+	if (substitutedLine != line && eolComment) STRCAT(pline, LINEMAX2, eolComment);
 }
 
-void ListFile() {
-	char* pp = pline;
-	aint pad;
-	if (pass != LASTPASS || !IsListingFileOpened || donotlist) {
+static void ListFileStringRtrim() {
+	// find end of currently prepared line
+	char* beyondLine = pline+24;
+	while (*beyondLine) ++beyondLine;
+	// and remove trailing white space (space, tab, newline, carriage return, etc..)
+	while (pline < beyondLine && White(beyondLine[-1])) --beyondLine;
+	// set new line and new string terminator after
+	*beyondLine++ = '\n';
+	*beyondLine = 0;
+}
+
+// returns FILE* handle to either actual file defined by --lst=xxx, or stderr if --msg=lst, or NULL
+// ! do not fclose this handle, for fclose logic use the FP_ListingFile variable itself !
+FILE* GetListingFile() {
+	if (NULL != FP_ListingFile) return FP_ListingFile;
+	if (OV_LST == Options::OutputVerbosity) return stderr;
+	return NULL;
+}
+
+void ListFile(bool showAsSkipped) {
+	if (LASTPASS != pass || NULL == GetListingFile() || donotlist) {
 		donotlist = nEB = 0; return;
 	}
-	if (!Options::ListingFName[0] || FP_ListingFile == NULL) {
-		return;
-	}
-	/*
-	if (listmacro) {
-		if (!nEB) {
-			return;
-		}
-	}
-	*/
-	pad = PreviousAddress;
-	if (pad == (aint) - 1) pad = epadres;
+	aint pad = PreviousAddress;
+	if (pad == -1L) pad = epadres;
 
-	if (strlen(line) && line[strlen(line) - 1] != 10) {
-		STRCAT(line, LINEMAX, "\n");
-	} else {
-		STRCPY(line, LINEMAX, "\n");
-	}
-
-	PrepareListLine(pad);
-	if (listmacro) pline[23] = '>';
-
-	int i;
 	int pos = 0;
-	while (1)
-	{
-		pp = pline + 10;
-		int maxEB = nEB; if (maxEB > 4) maxEB = 4;
-		for (i = 0; i < maxEB; i++) pp += sprintf(pp, " %02X", EB[i + pos]); *pp = ' ';
-		if (pline[24] == '\n' && !listmacro) { *pp = '\n'; pp[1] = 0; }
-		fputs(pline, FP_ListingFile);
-		nEB -= maxEB;
-		pad += maxEB;
-		pos += maxEB;
-		if (!nEB) break;
-		memset(pline + 11, ' ', 11);
-		pline[24] = '\n';
-		pline[25] = 0;
-		sprintf(pline + 6, "%04lX", pad & 0xFFFF); pline[10] = ' ';
-	}
-	/*
-	*pp = 0;
-	printCurrentLocalLine(pp);
-	PrintHEX16(pp, pad);
-	*(pp++) = ' ';
-	if (nEB < 5) {
-		listbytes(pp);
-		*pp = 0;
-		if (listmacro) {
-			STRCAT(pp, LINEMAX2, ">");
+	do {
+		if (showAsSkipped) substitutedLine = line;	// override substituted lines in skipped mode
+		PrepareListLine(pad);
+		if (pos) pline[24] = 0;		// remove source line on sub-sequent list-lines
+		char* pp = pline + 10;
+		int BtoList = (nEB < 4) ? nEB : 4;
+		for (int i = 0; i < BtoList; ++i) {
+			if (-2 == EB[i + pos]) pp += sprintf(pp, "...");
+			else pp += sprintf(pp, " %02X", EB[i + pos]);
 		}
-		STRCAT(pp, LINEMAX2, line);
-		fputs(pline, FP_ListingFile);
-	}
-	else if (nEB < 6) {
-		listbytes2(pp); *pp = 0;
-		if (listmacro) {
-			STRCAT(pp, LINEMAX2, ">");
-		}
-		STRCAT(pp, LINEMAX2, line);
-		fputs(pline, FP_ListingFile);
-	}
-	else {
-		for (int i = 0; i != 12; ++i) {
-			*(pp++) = ' ';
-		}
-		*pp = 0;
-		if (listmacro) {
-			STRCAT(pp, LINEMAX2, ">");
-		}
-		STRCAT(pp, LINEMAX2, line);
-		fputs(pline, FP_ListingFile);
-		listbytes3(pad);
-	}
-	*/
+		*pp = ' ';
+		if (showAsSkipped) pline[11] = '~';
+		ListFileStringRtrim();
+		fputs(pline, GetListingFile());
+		nEB -= BtoList;
+		pad += BtoList;
+		pos += BtoList;
+	} while (0 < nEB);
 	epadres = CurAddress;
-	PreviousAddress = (aint) - 1;
+	PreviousAddress = -1L;
 	nEB = 0;
-	listdata = 0;
-}
-
-void ListFileSkip(char* line) {
-	aint pad;
-	if (pass != LASTPASS || !IsListingFileOpened || donotlist) {
-		donotlist = nEB = 0;
-		return;
-	}
-	if (!Options::ListingFName[0] || FP_ListingFile == NULL) {
-		return;
-	}
-	/*
-	if (listmacro) {
-		return;
-	}
-	*/
-	pad = PreviousAddress;
-	if (pad == (aint)-1) pad = epadres;
-
-	if (strlen(line) && line[strlen(line) - 1] != 10) {
-		STRCAT(line, LINEMAX, "\n");
-	}
-	else {
-		STRCPY(line, LINEMAX, "\n");
-	}
-
-	PrepareListLine(pad);
-	pline[11] = '~';
-	if (*line == '\n') { pline[12] = '\n'; pline[13] = 0; }
-
-	/*
-	*pp = 0;
-	printCurrentLocalLine(pp);
-	PrintHEX16(pp, pad);
-	*pp = 0;
-	STRCAT(pp, LINEMAX2, " ~           ");
-	if (nEB) {
-		Error("Internal error lfs", 0, FATAL);
-	}
-	if (listmacro) {
-		STRCAT(pp, LINEMAX2, ">");
-	}
-	STRCAT(pp, LINEMAX2, line);
-	*/
-	fputs(pline, FP_ListingFile);
-	epadres = CurAddress;
-	PreviousAddress = (aint) - 1;
-	nEB = 0;
-	listdata = 0;
 }
 
 void CheckPage() {
@@ -565,24 +345,18 @@ void CheckPage() {
 	}
 	MemoryPointer = MemoryRAM + addadr;*/
 
-	CDeviceSlot* S;
-	for (aint i=0;i<Device->SlotsCount;i++) {
-		S = Device->GetSlot(i);
-		if (CurAddress >= S->Address && ((CurAddress < 65536 && CurAddress < S->Address + S->Size) || (CurAddress >= 65536 && CurAddress <= S->Address + S->Size))) {
-			if (PseudoORG) {
-				MemoryPointer = S->Page->RAM + (adrdisp - S->Address);
-				Page = S->Page;
-				return;
-			} else {
-				MemoryPointer = S->Page->RAM + (CurAddress - S->Address);
-				Page = S->Page;
-				return;
-			}
+	for (int i=0;i<Device->SlotsCount;i++) {
+		CDeviceSlot* S = Device->GetSlot(i);
+		int realAddr = PseudoORG ? adrdisp : CurAddress;
+		if (realAddr >= S->Address && ((realAddr < 65536 && realAddr < S->Address + S->Size) \
+										|| (realAddr >= 65536 && realAddr <= S->Address + S->Size))) {
+			MemoryPointer = S->Page->RAM + (realAddr - S->Address);
+			Page = S->Page;
+			return;
 		}
 	}
 
-	Warning("Error in CheckPage(). Please, contact with the author of this program.", 0, FATAL);
-	ExitASM(1);
+	Error("CheckPage(): please, contact the author of this program.", NULL, FATAL);
 }
 
 void Emit(int byte)
@@ -618,7 +392,8 @@ void EmitWord(int word) {
 
 void EmitBytes(int* bytes) {
 	if (*bytes == -1) {
-		Error("Illegal instruction", line, CATCHALL); *lp = 0;
+		Error("Illegal instruction", line, IF_FIRST);
+		SkipToEol(lp);
 	}
 	while (*bytes != -1) {
 		Emit(*bytes++);
@@ -632,30 +407,30 @@ void EmitWords(int* words) {
 	}
 }
 
-void EmitBlock(aint byte, aint len, bool nulled) {
-	if (len) EB[nEB++] = byte;
-
-	if (len < 0)
-	{
+void EmitBlock(aint byte, aint len, bool preserveDeviceMemory, int emitMaxToListing) {
+	if (len <= 0) {
 		CurAddress = (CurAddress + len) & 0xFFFF;
 		if (PseudoORG) adrdisp = (adrdisp + len) & 0xFFFF;
 		CheckPage();
+		return;
 	}
-	else while (len--)
-	{
+	while (len--) {
 		CheckRamLimitExceeded();
-
-		if (pass == LASTPASS)
-		{
+		if (pass == LASTPASS) {
 			WriteBuffer[WBLength++] = (char)byte;
 			if (WBLength == DESTBUFLEN) WriteDest();
 
 			if (DeviceID)
 			{
 				if ((MemoryPointer - Page->RAM) >= (int)Page->Size) CheckPage();
-				if (!nulled) *MemoryPointer = (char)byte;
+				if (!preserveDeviceMemory) *MemoryPointer = (char)byte;
 
 				MemoryPointer++;
+			}
+			if (emitMaxToListing) {
+				// put "..." marker into listing if some more bytes are emitted after last listed
+				if ((0 == --emitMaxToListing) && len) EB[nEB++] = -2;
+				else EB[nEB++] = DeviceID ? MemoryPointer[-1] : byte;
 			}
 		}
 		++CurAddress;
@@ -686,7 +461,7 @@ char* GetPath(char* fname, char** filenamebegin, bool systemPathsBeforeCurrent)
 	}
 	// copy the result into new memory
 	char* kip = STRDUP(fullFilePath);
-	if (kip == NULL) Error("No enough memory!", 0, FATAL);
+	if (kip == NULL) Error("No enough memory!", NULL, FATAL);
 	// convert filenamebegin pointer into the copied string (from temporary buffer pointer)
 	if (filenamebegin) *filenamebegin += (kip - fullFilePath);
 	return kip;
@@ -704,7 +479,6 @@ void BinIncFile(char* fname, int offset, int len) {
 	}
 	free(fullFilePath);
 
-	if (len == -1) len = 0;
 	if (offset == -1) offset = 0;
 
 	// Get length of file //
@@ -714,8 +488,23 @@ void BinIncFile(char* fname, int offset, int len) {
 	if (totlen < 0)
 		Error("Error telling file (len)", fname, FATAL);
 
+	if (len == -1) len = totlen - offset;
+	// Getting final length of included data //
+	if (0 == len) {
+		Warning("INCBIN: requested to include no data (len=0)");
+		fclose(bif);
+		return;
+	}
 
-	printf("INCBIN: name=%s  Offset=%u  Len=%u\n", fname, offset, len);
+	if (LASTPASS == pass && Options::OutputVerbosity <= OV_ALL) {
+		char diagnosticTxt[MAX_PATH];
+		SPRINTF3(diagnosticTxt, MAX_PATH, "INCBIN: name=%s  Offset=%u  Len=%u\n", fname, offset, len);
+		_CERR diagnosticTxt _ENDL;
+	}
+
+	// Check requested data //
+	if (offset + len > totlen)
+		Error("Error file too short", fname, FATAL);
 
 	// Seek to begin of including part //
 	if (offset > totlen)
@@ -725,31 +514,22 @@ void BinIncFile(char* fname, int offset, int len) {
 	if (ftell(bif) != offset)
 		Error("Error telling file (offs)", fname, FATAL);
 
-	// Check requested data //
-	if (offset + len > totlen)
-		Error("Error file too short", fname, FATAL);
-
 	// Getting final length of included data //
-	if (!len) len = totlen - offset;
-	if (len > 0x10000)
-	{
+	if (len > 0x10000) {
 		len = 0x10000;
-		Warning("Included data truncated to 64kB", 0, LASTPASS);
+		Warning("Included data truncated to 64kB from");
 	}
 
-	if (pass != LASTPASS)
-	{
+	if (pass != LASTPASS) {
 		CurAddress = (CurAddress + len) & 0xFFFF;
 		if (PseudoORG) adrdisp = (adrdisp + len) & 0xFFFF;
-	}
-	else
-	{
+	} else {
 		// Reading data from file //
 		char* data = new char[len + 1];
 		char *bp = data;
 
 		if (bp == NULL)
-			Error("No enough memory for file", 0, FATAL);
+			ErrorInt("No enough memory for file", (len + 1), FATAL);
 
 		res = fread(bp, 1, len, bif);
 
@@ -758,17 +538,14 @@ void BinIncFile(char* fname, int offset, int len) {
 		if (res != len)
 			Error("Can't read file (no enough data)", fname, FATAL);
 
-		while (len--)
-		{
+		while (len--) {
 			CheckRamLimitExceeded();
 
-			if (pass == LASTPASS)
-			{
+			if (pass == LASTPASS) {
 				WriteBuffer[WBLength++] = *bp;
 				if (WBLength == DESTBUFLEN) WriteDest();
 
-				if (DeviceID)
-				{
+				if (DeviceID) {
 					if ((MemoryPointer - Page->RAM) >= (int)Page->Size) CheckPage();
 					*MemoryPointer = *bp;
 
@@ -785,51 +562,95 @@ void BinIncFile(char* fname, int offset, int len) {
 	fclose(bif);
 }
 
+static void OpenDefaultList(const char *fullpath);
+
+static auto stdin_log_it = stdin_log.cbegin();
+
 void OpenFile(char* nfilename, bool systemPathsBeforeCurrent)
 {
 	char ofilename[LINEMAX];
-	char* oCurrentDirectory, * fullpath;
+	char* oCurrentDirectory, * fullpath, * listFullName = NULL;
 	TCHAR* filenamebegin;
 
 	if (++IncludeLevel > 20) {
-		Error("Over 20 files nested", 0, FATAL);
+		Error("Over 20 files nested", NULL, FATAL);
 	}
-	fullpath = GetPath(nfilename, &filenamebegin, systemPathsBeforeCurrent);
+	if (!*nfilename) {
+		fullpath = STRDUP("console_input");
+		filenamebegin = fullpath;
+		FP_Input = stdin;
+		stdin_log_it = stdin_log.cbegin();	// reset read iterator (for 2nd+ pass)
+	} else {
+		fullpath = GetPath(nfilename, &filenamebegin, systemPathsBeforeCurrent);
 
-	if (!FOPEN_ISOK(FP_Input, fullpath, "rb")) {
-		free(fullpath);
-		Error("Error opening file", nfilename, FATAL);
+		if (!FOPEN_ISOK(FP_Input, fullpath, "rb")) {
+			free(fullpath);
+			Error("Error opening file", nfilename, FATAL);
+		}
 	}
 
-	aint oCurrentLocalLine = CurrentLocalLine;
-	CurrentLocalLine = 0;
+	// open default listing file for each new source file (if default listing is ON)
+	if (LASTPASS == pass && 0 == IncludeLevel && Options::IsDefaultListingName) {
+		OpenDefaultList(fullpath);			// explicit listing file is already opened
+	}
+	// show in listing file which file was opened
+	FILE* listFile = GetListingFile();
+	if (LASTPASS == pass && listFile) {
+		listFullName = STRDUP(fullpath);	// create copy of full filename for listing file
+		fputs("# file opened: ", listFile);
+		fputs(listFullName, listFile);
+		fputs("\n", listFile);
+	}
+
+	aint oCurrentLocalLine = CurrentSourceLine;
+	CurrentSourceLine = 0;
 	STRCPY(ofilename, LINEMAX, filename);
 
 	if (Options::IsShowFullPath) {
 		STRCPY(filename, LINEMAX, fullpath);
 	} else {
-		STRCPY(filename, LINEMAX, nfilename);
+		STRCPY(filename, LINEMAX, filenamebegin);
 	}
 
 	oCurrentDirectory = CurrentDirectory;
 	*filenamebegin = 0;
 	CurrentDirectory = fullpath;
 
-	RL_Readed = 0; rlpbuf = rlbuf;
-	ReadBufLine(true);
+	rlpbuf = rlpbuf_end = rlbuf;
+	colonSubline = false;
+	blockComment = 0;
 
-	fclose(FP_Input);
-	--IncludeLevel;
+	ReadBufLine();
+
+	if (stdin != FP_Input) fclose(FP_Input);
+	else if (1 == pass) stdin_log.push_back(0);		// add extra zero terminator
 	CurrentDirectory = oCurrentDirectory;
+
+	// show in listing file which file was closed
+	if (LASTPASS == pass && listFile) {
+		fputs("# file closed: ", listFile);
+		fputs(listFullName, listFile);
+		fputs("\n", listFile);
+		free(listFullName);
+
+		// close listing file (if "default" listing filename is used)
+		if (FP_ListingFile && 0 == IncludeLevel && Options::IsDefaultListingName) {
+			if (Options::AddLabelListing) LabelTable.Dump();
+			fclose(FP_ListingFile);
+			FP_ListingFile = NULL;
+		}
+	}
+
+	--IncludeLevel;
 
 	// Free memory
 	free(fullpath);
 
 	STRCPY(filename, LINEMAX, ofilename);
-	if (CurrentLocalLine > maxlin) {
-		maxlin = CurrentLocalLine;
+	if (CurrentSourceLine > maxlin) {
+		maxlin = CurrentSourceLine;
 	}
-	CurrentLocalLine = oCurrentLocalLine;
+	CurrentSourceLine = oCurrentLocalLine;
 }
 
 void IncludeFile(char* nfilename, bool systemPathsBeforeCurrent)
@@ -837,201 +658,184 @@ void IncludeFile(char* nfilename, bool systemPathsBeforeCurrent)
 	FILE* oFP_Input = FP_Input;
 	FP_Input = 0;
 
-	char* pbuf = rlpbuf;
-	char* buf = STRDUP(rlbuf);
-	if (buf == NULL) Error("No enough memory!", 0, FATAL);
-	int readed = RL_Readed;
-	bool squotes = rlsquotes,dquotes = rldquotes,space = rlspace,comment = rlcomment,colon = rlcolon,newline = rlnewline;
-
-	rldquotes = false; rlsquotes = false;rlspace = false;rlcomment = false;rlcolon = false;rlnewline = true;
-
-	memset(rlbuf, 0, 8192);
+	char* pbuf = rlpbuf, * pbuf_end = rlpbuf_end, * buf = STRDUP(rlbuf);
+	if (buf == NULL) Error("No enough memory!", NULL, FATAL);
+	bool oColonSubline = colonSubline;
+	if (blockComment) Error("Internal error 'block comment'", NULL, FATAL);	// comment can't INCLUDE
 
 	OpenFile(nfilename, systemPathsBeforeCurrent);
 
-	rlsquotes = squotes,rldquotes = dquotes,rlspace = space,rlcomment = comment,rlcolon = colon,rlnewline = newline;
-	rlpbuf = pbuf;
+	colonSubline = oColonSubline;
+	rlpbuf = pbuf, rlpbuf_end = pbuf_end;
 	STRCPY(rlbuf, 8192, buf);
-	RL_Readed = readed;
-
 	free(buf);
 
 	FP_Input = oFP_Input;
 }
 
+static bool ReadBufData() {
+	// check here also if `line` buffer is not full
+	if ((LINEMAX-2) <= (rlppos - line)) Error("Line too long", NULL, FATAL);
+	// now check for read data
+	if (rlpbuf < rlpbuf_end) return 1;		// some data still in buffer
+	if (stdin != FP_Input && feof(FP_Input)) return 0;	// no more data in file
+	// read next block of data
+	rlpbuf = rlbuf;
+	// handle STDIN file differently (pass1 = read it, pass2+ replay "log" variable)
+	if (1 == pass || stdin != FP_Input) {	// ordinary file is re-read every pass normally
+		rlpbuf_end = rlbuf + fread(rlbuf, 1, 4096, FP_Input);
+		*rlpbuf_end = 0;					// add zero terminator after new block
+	}
+	if (stdin == FP_Input) {
+		// store copy of stdin into stdin_log during pass 1
+		if (1 == pass && rlpbuf < rlpbuf_end) {
+			stdin_log.insert(stdin_log.end(), rlpbuf, rlpbuf_end);
+		}
+		// replay the log in 2nd+ pass
+		if (1 < pass) {
+			rlpbuf_end = rlpbuf;
+			long toCopy = std::min(8000L, (stdin_log.cend() - stdin_log_it));
+			if (0 < toCopy) {
+				memcpy(rlbuf, &(*stdin_log_it), toCopy);
+				stdin_log_it += toCopy;
+				rlpbuf_end += toCopy;
+			}
+			*rlpbuf_end = 0;				// add zero terminator after new block
+		}
+	}
+	return (rlpbuf < rlpbuf_end);			// return true if some data were read
+}
+
 void ReadBufLine(bool Parse, bool SplitByColon) {
-	rlppos = line;
-	if (rlcolon) {
-		*(rlppos++) = '\t';
-	}
-	while (IsRunning && (RL_Readed > 0 || (RL_Readed = fread(rlbuf, 1, 4096, FP_Input)))) {
-		if (!*rlpbuf) {
-			rlpbuf = rlbuf;
-		}
-		while (RL_Readed > 0) {
-
-			if (!CurrentLocalLine)
-			{
-				CurrentLocalLine++;
-				CurrentGlobalLine++;
-				CompiledCurrentLine++;
-			}
-
-			if (*rlpbuf == '\n' || *rlpbuf == '\r') {
-
-				rlpbuf++; RL_Readed--;
-				if (rlpbuf[-1] == '\r')
-				{
-					if (!RL_Readed)
-					{
-						RL_Readed = fread(rlbuf, 1, 4096, FP_Input);
-						if (!RL_Readed) break;
-						rlpbuf = rlbuf;
-					}
-					if (*rlpbuf == '\n') { rlpbuf++; RL_Readed--; }
-				}
-				/*
-				if (*rlpbuf == '\n') {
-					rlpbuf++;RL_Readed--;
-					if (*rlpbuf && *rlpbuf == '\r') {
-						rlpbuf++;RL_Readed--;
-					}
-				} else if (*rlpbuf == '\r') {
-					rlpbuf++;RL_Readed--;
-				}
-				*/
-				*rlppos = 0;
-				if (strlen(line) == LINEMAX - 1) {
-					Error("Line too long", 0, FATAL);
-				}
-				rlsquotes = rldquotes = rlcomment = rlspace = rlcolon = false;
-				//_COUT line _ENDL;
-				if (Parse) {
-					ParseLine();
-				} else {
-					rlnewline = true;
-					CurrentLocalLine++;
-					CurrentGlobalLine++;
-					CompiledCurrentLine++;
-					return;
-				}
-				rlppos = line;
-				if (rlcolon) {
-					*(rlppos++) = ' ';
-				}
-				rlnewline = true;
-				CurrentLocalLine++;
-				CurrentGlobalLine++;
-				CompiledCurrentLine++;
-			} else if (SplitByColon && *rlpbuf == ':' && rlspace && !rldquotes && !rlsquotes && !rlcomment) {
-				while (*rlpbuf && *rlpbuf == ':') {
-					rlpbuf++;RL_Readed--;
-				}
-			  	*rlppos = 0;
-				if (strlen(line) == LINEMAX - 1) {
-					Error("Line too long", 0, FATAL);
-				}
-				/*if (rlnewline) {
-					CurrentLocalLine++; CurrentLine++; CurrentGlobalLine++; rlnewline = false;
-				}*/
-				rlcolon = true;
-				if (Parse) {
-					ParseLine();
-				} else {
-					return;
-				}
-			  	rlppos = line;
-				if (rlcolon) {
-					*(rlppos++) = ' ';
-				}
-			}  else if (*rlpbuf == ':' && !rlspace && !rlcolon && !rldquotes && !rlsquotes && !rlcomment) {
-			  	lp = line; *rlppos = 0; /* char* n;
-					if ((n = getinstr(lp)) && DirectivesTable.Find(n)) {
-					//it's directive
-					while (*rlpbuf && *rlpbuf == ':') {
-						rlpbuf++;RL_Readed--;
-					}
-					if (strlen(line) == LINEMAX - 1) {
-						Error("Line too long", 0, FATAL);
-					}
-					if (rlnewline) {
-						CurrentLocalLine++;
-						CompiledCurrentLine++;
-						CurrentGlobalLine++;
-						rlnewline = false;
-					}
-					rlcolon = true;
-					if (Parse) {
-						ParseLine();
-					} else {
-						return;
-					}
-					rlspace = true;
-					rlppos = line;
-					if (rlcolon) {
-						*(rlppos++) = ' ';
-					}
-				} else {	*/
-				    // it's label
-				    *(rlppos++) = ':';
-				    //*(rlppos++) = ' ';
-				    rlspace = true;
-				    while (*rlpbuf && *rlpbuf == ':') {
-					rlpbuf++;
-					RL_Readed--;
-				    // }
-				}
-			} else {
-				if (*rlpbuf == '\'' && !rldquotes && !rlcomment) {
-					if (rlsquotes) {
-						rlsquotes = false;
-					} else {
-						rlsquotes = true;
-					}
-				} else if (*rlpbuf == '"' && !rlsquotes && !rlcomment) {
-					if (rldquotes) {
-						rldquotes = false;
-					} else {
-						rldquotes = true;
-					}
-				} else if (*rlpbuf == ';' && !rlsquotes && !rldquotes) {
-					rlcomment = true;
-				} else if (*rlpbuf == '/' && *(rlpbuf + 1) == '/' && !rlsquotes && !rldquotes) {
-					rlcomment = true;
-					*(rlppos++) = *(rlpbuf++); RL_Readed--;
-				} else if (*rlpbuf <= ' ' && !rlsquotes && !rldquotes && !rlcomment) {
-					rlspace = true;
-				}
-				*(rlppos++) = *(rlpbuf++); RL_Readed--;
-			}
-		}
-		rlpbuf = rlbuf;
-	}
-	//for end line
-	if (feof(FP_Input) && RL_Readed <= 0 && *line) { //line? not a *line ?
-		/* if (rlnewline) {
-			CurrentLocalLine++;
-			CompiledCurrentLine++;
-			CurrentGlobalLine++;
-		} */
-		rlsquotes = rldquotes = rlcomment = rlspace = rlcolon = false;
-		rlnewline = true;
-		*rlppos = 0;
-		if (Parse) {
-			ParseLine();
-		} else {
-			return;
-		}
+	// if everything else fails (no data, not running, etc), return empty line
+	*line = 0;
+	bool IsLabel = true;
+	// try to read through the buffer and produce new line from it
+	while (IsRunning && ReadBufData()) {
+		// start of new line (or fake "line" by colon)
 		rlppos = line;
+		substitutedLine = line;		// also reset "substituted" line to the raw new one
+		eolComment = NULL;
+		if (colonSubline) {			// starting from colon (creating new fake "line")
+			colonSubline = false;	// (can't happen inside block comment)
+			*(rlppos++) = ' ';
+		} else {					// starting real new line
+			++CurrentSourceLine;
+			IsLabel = (0 == blockComment);
+		}
+		// copy data from read buffer into `line` buffer until EOL/colon is found
+		while (
+				ReadBufData() && '\n' != *rlpbuf && '\r' != *rlpbuf &&	// split by EOL
+				// split by colon only on 2nd+ char && SplitByColon && not inside block comment
+				(blockComment || !SplitByColon || rlppos == line || ':' != *rlpbuf)) {
+			// copy the new character to new line
+			*rlppos = *rlpbuf++;
+			// Block comments logic first (anything serious may happen only "outside" of block comment
+			if ('*' == *rlppos && ReadBufData() && '/' == *rlpbuf) {
+				if (0 < blockComment) --blockComment;	// block comment ends here, -1 from nesting
+				++rlppos;	*rlppos++ = *rlpbuf++;		// copy the second char too
+				continue;
+			}
+			if ('/' == *rlppos && ReadBufData() && '*' == *rlpbuf) {
+				++rlppos, ++blockComment;				// block comment starts here, nest +1 more
+				*rlppos++ = *rlpbuf++;					// copy the second char too
+				continue;
+			}
+			if (blockComment) {							// inside block comment just copy chars
+				++rlppos;
+				continue;
+			}
+			// check if still in label area, if yes, copy the finishing colon as char (don't split by it)
+			if ((IsLabel = IsLabel && islabchar(*rlppos))) {
+				++rlppos;					// label character
+				if (ReadBufData() && ':' == *rlpbuf) {	// colon after label, add it
+					*rlppos++ = *rlpbuf++;
+					IsLabel = false;
+				}
+				continue;
+			}
+			// not in label any more, check for EOL comments ";" or "//"
+			if ((';' == *rlppos) || ('/' == *rlppos && ReadBufData() && '/' == *rlpbuf)) {
+				eolComment = rlppos;
+				++rlppos;					// EOL comment ";"
+				while (ReadBufData() && '\n' != *rlpbuf && '\r' != *rlpbuf) *rlppos++ = *rlpbuf++;
+				continue;
+			}
+			// check for string literals - double/single quotes
+			if ('"' == *rlppos || '\'' == *rlppos) {
+				const bool quotes = '"' == *rlppos;
+				int escaped = 0;
+				do {
+					if (escaped) --escaped;
+					++rlppos;				// previous char confirmed
+					*rlppos = ReadBufData() ? *rlpbuf : 0;	// copy next char (if available)
+					if (!*rlppos || '\r' == *rlppos || '\n' == *rlppos) *rlppos = 0;	// not valid
+					else ++rlpbuf;			// buffer char read (accepted)
+					if (quotes && !escaped && '\\' == *rlppos) escaped = 2;	// escape sequence detected
+				} while (*rlppos && (escaped || (quotes ? '"' : '\'') != *rlppos));
+				if (*rlppos) ++rlppos;		// there should be ending "/' in line buffer, confirm it
+				continue;
+			}
+			// anything else just copy
+			++rlppos;				// previous char confirmed
+		} // while "some char in buffer, and it's not line delimiter"
+		// line interrupted somehow, may be correctly finished, check + finalize line and process it
+		*rlppos = 0;
+		// skip <EOL> char sequence in read buffer
+		if (ReadBufData() && ('\r' == *rlpbuf || '\n' == *rlpbuf)) {
+			char CRLFtest = (*rlpbuf++) ^ ('\r'^'\n');	// flip CR->LF || LF->CR (and eats first)
+			if (ReadBufData() && CRLFtest == *rlpbuf) ++rlpbuf;	// if CRLF/LFCR pair, eat also second
+			// if this was very last <EOL> in file (on non-empty line), add one more fake empty line
+			if (!ReadBufData() && *line) *rlpbuf_end++ = '\n';	// to make listing files "as before"
+		} else {
+			// advance over single colon if that was the reason to terminate line parsing
+			colonSubline = SplitByColon && ReadBufData() && (':' == *rlpbuf) && ++rlpbuf;
+		}
+		// line is parsed and ready to be processed
+		if (Parse) 	ParseLine();	// processed here in loop
+		else 		return;			// processed externally
+	} // while (IsRunning && ReadBufData())
+}
+
+static void OpenListImp(const char* listFilename) {
+	// if STDERR is configured to contain listing, disable other listing files
+	if (OV_LST == Options::OutputVerbosity) return;
+	if (NULL == listFilename || !listFilename[0]) return;
+	if (!FOPEN_ISOK(FP_ListingFile, listFilename, "w")) {
+		Error("Error opening file", listFilename, FATAL);
 	}
 }
 
 void OpenList() {
-	if (Options::ListingFName[0]) {
-		if (!FOPEN_ISOK(FP_ListingFile, Options::ListingFName, "w")) {
-			Error("Error opening file", Options::ListingFName, FATAL);
+	// if STDERR is configured to contain listing, disable other listing files
+	if (OV_LST == Options::OutputVerbosity) return;
+	// check if listing file is already opened, or it is set to "default" file names
+	if (Options::IsDefaultListingName || NULL != FP_ListingFile) return;
+	// Only explicit listing files are opened here
+	OpenListImp(Options::ListingFName);
+}
+
+static void OpenDefaultList(const char *fullpath) {
+	// if STDERR is configured to contain listing, disable other listing files
+	if (OV_LST == Options::OutputVerbosity) return;
+	// check if listing file is already opened, or it is set to explicit file name
+	if (!Options::IsDefaultListingName || NULL != FP_ListingFile) return;
+	if (NULL == fullpath || !*fullpath) return;		// no filename provided
+	// Create default listing name, and try to open it
+	char tempListName[LINEMAX+10];		// make sure there is enough room for new extension
+	STRCPY(tempListName, LINEMAX, fullpath);
+	// find extension of that file and overwrite it with ".lst"
+	char* extPos = tempListName + strlen(tempListName);
+	while (tempListName < extPos && '.' != *extPos) {
+		--extPos;
+		if ('/' == *extPos || '\\' == *extPos || tempListName == extPos) {	// no extension found
+			extPos = tempListName + strlen(tempListName);	// just append it then to the fullname
+			break;
 		}
 	}
+	STRCPY(extPos, 5, ".lst");
+	// list filename prepared, open it
+	OpenListImp(tempListName);
 }
 
 void OpenUnrealList() {
@@ -1041,37 +845,21 @@ void OpenUnrealList() {
 }
 
 void CloseDest() {
-	
-	// Correction for 1.10.1
 	// Flush buffer before any other operations
 	WriteDest();
-
-	// simple check
-	if (FP_Output == NULL) {
-		return;
-	}
-
-	long pad;
-	//if (WBLength) {
-	//	WriteDest();
-	//}
-	if (size != (aint)-1) {
+	// does main output file exist? (to close it)
+	if (FP_Output == NULL) return;
+	// pad to desired size (and check for exceed of it)
+	if (size != -1L) {
 		if (destlen > size) {
-			Error("File exceeds 'size'", 0);
-		} else {
-			pad = size - destlen;
-			if (pad > 0) {
-				while (pad--) {
-					WriteBuffer[WBLength++] = 0;
-					if (WBLength == 256) {
-						WriteDest();
-					}
-				}
-			}
-			if (WBLength) {
-				WriteDest();
-			}
+			ErrorInt("File exceeds 'size' by", destlen - size);
 		}
+		memset(WriteBuffer, 0, DESTBUFLEN);
+		while (destlen < size) {
+			WBLength = std::min(aint(DESTBUFLEN), size-destlen);
+			WriteDest();
+		}
+		size = -1L;
 	}
 	fclose(FP_Output);
 	FP_Output = NULL;
@@ -1080,42 +868,35 @@ void CloseDest() {
 void SeekDest(long offset, int method) {
 	WriteDest();
 	if (FP_Output != NULL && fseek(FP_Output, offset, method)) {
-		Error("File seek error (FORG)", 0, FATAL);
+		Error("File seek error (FORG)", NULL, FATAL);
 	}
 }
 
-void NewDest(char* newfilename) {
-	NewDest(newfilename, OUTPUT_TRUNCATE);
-}
-
 void NewDest(char* newfilename, int mode) {
-	// close file
+	// close previous output file
 	CloseDest();
 
-	// and open new file
-	STRCPY(Options::DestionationFName, LINEMAX, newfilename);
+	// and open new file (keep previous/default name, if no explicit was provided)
+	if (newfilename && *newfilename) STRCPY(Options::DestinationFName, LINEMAX, newfilename);
 	OpenDest(mode);
-}
-
-void OpenDest() {
-	OpenDest(OUTPUT_TRUNCATE);
 }
 
 void OpenDest(int mode) {
 	destlen = 0;
-	if (mode != OUTPUT_TRUNCATE && !FileExists(Options::DestionationFName)) {
+	if (mode != OUTPUT_TRUNCATE && !FileExists(Options::DestinationFName)) {
 		mode = OUTPUT_TRUNCATE;
 	}
-	if (!Options::NoDestinationFile && !FOPEN_ISOK(FP_Output, Options::DestionationFName, mode == OUTPUT_TRUNCATE ? "wb" : "r+b")) {
-		Error("Error opening file", Options::DestionationFName, FATAL);
+	if (!Options::NoDestinationFile && !FOPEN_ISOK(FP_Output, Options::DestinationFName, mode == OUTPUT_TRUNCATE ? "wb" : "r+b")) {
+		Error("Error opening file", Options::DestinationFName, FATAL);
 	}
 	Options::NoDestinationFile = false;
+	if (NULL == FP_RAW && '-' == Options::RAWFName[0] && 0 == Options::RAWFName[1]) FP_RAW = stdout;
 	if (FP_RAW == NULL && Options::RAWFName[0] && !FOPEN_ISOK(FP_RAW, Options::RAWFName, "wb")) {
 		Error("Error opening file", Options::RAWFName);
 	}
 	if (FP_Output != NULL && mode != OUTPUT_TRUNCATE) {
 		if (fseek(FP_Output, 0, mode == OUTPUT_REWIND ? SEEK_SET : SEEK_END)) {
-			Error("File seek error (OUTPUT)", 0, FATAL);
+			Error("File seek error (OUTPUT)", NULL, FATAL);
 		}
 	}
 }
@@ -1128,13 +909,13 @@ void CloseTapFile()
 	if (FP_tapout == NULL) return;
 
 	tap_data[0] = tape_parity & 0xFF;
-	if (fwrite(tap_data, 1, 1, FP_tapout) != 1) Error("Write error (disk full?)", 0, FATAL);
+	if (fwrite(tap_data, 1, 1, FP_tapout) != 1) Error("Write error (disk full?)", NULL, FATAL);
 
-	if (fseek(FP_tapout, tape_seek, SEEK_SET)) Error("File seek end error in TAPOUT", 0, FATAL);
+	if (fseek(FP_tapout, tape_seek, SEEK_SET)) Error("File seek end error in TAPOUT", NULL, FATAL);
 
 	tap_data[0] =  tape_length     & 0xFF;
 	tap_data[1] = (tape_length>>8) & 0xFF;
-	if (fwrite(tap_data, 1, 2, FP_tapout) != 2) Error("Write error (disk full?)", 0, FATAL);
+	if (fwrite(tap_data, 1, 2, FP_tapout) != 2) Error("Write error (disk full?)", NULL, FATAL);
 
 	fclose(FP_tapout);
 	FP_tapout = NULL;
@@ -1157,7 +938,7 @@ void OpenTapFile(char * tapename, int flagbyte)
 	if (fwrite(tap_data, 1, 3, FP_tapout) != 3)
 	{
 		fclose(FP_tapout);
-		Error("Write error (disk full?)", 0, FATAL);
+		Error("Write error (disk full?)", NULL, FATAL);
 	}
 }
 
@@ -1179,7 +960,7 @@ void Close() {
 		FP_ExportFile = NULL;
 	}
 	if (FP_RAW != NULL) {
-		fclose(FP_RAW);
+		if (stdout != FP_RAW) fclose(FP_RAW);
 		FP_RAW = NULL;
 	}
 	if (FP_ListingFile != NULL) {
@@ -1207,7 +988,7 @@ int SaveRAM(FILE* ff, int start, int length) {
 	}
 
 	CDeviceSlot* S;
-	for (aint i=0;i<Device->SlotsCount;i++) {
+	for (int i=0;i<Device->SlotsCount;i++) {
 		S = Device->GetSlot(i);
 		if (start >= (int)S->Address  && start < (int)(S->Address + S->Size)) {
 			if (length < (int)(S->Size - (start - S->Address))) {
@@ -1220,7 +1001,6 @@ int SaveRAM(FILE* ff, int start, int length) {
 			}
 			length -= save;
 			start += save;
-			//_COUT "Start: " _CMDL start _CMDL " Length: " _CMDL length _ENDL;
 			if (length <= 0) {
 				return 1;
 			}
@@ -1313,15 +1093,14 @@ unsigned char MemGetByte(unsigned int address) {
 	}
 
 	CDeviceSlot* S;
-	for (aint i=0;i<Device->SlotsCount;i++) {
+	for (int i=0;i<Device->SlotsCount;i++) {
 		S = Device->GetSlot(i);
 		if (address >= (unsigned int)S->Address  && address < (unsigned int)S->Address + (unsigned int)S->Size) {
 			return S->Page->RAM[address - S->Address];
 		}
 	}
 
-	Warning("Error with MemGetByte!", 0);
-	ExitASM(1);
+	Error("Error with MemGetByte!", NULL, FATAL);
 	return 0;
 
 	/*// $4000-$7FFF
@@ -1383,7 +1162,6 @@ int SaveBinary(char* fname, int start, int length) {
 	if (length <= 0) {
 		length = 0x10000 - start;
 	}
-	//_COUT "Start: " _CMDL start _CMDL " Length: " _CMDL length _ENDL;
 	if (!SaveRAM(ff, start, length)) {
 		fclose(ff);return 0;
 	}
@@ -1467,156 +1245,94 @@ int SaveHobeta(char* fname, char* fhobname, int start, int length) {
 	return 1;
 }
 
-EReturn ReadFile(const char* pp, const char* err) {
-	char* p;
-	while (lijst || RL_Readed > 0 || !feof(FP_Input)) {
-		if (!IsRunning) {
-			return END;
-		}
+EReturn ReadFile() {
+	while (IsRunning && (lijst || ReadLine())) {
 		if (lijst) {
-			if (!lijstp) {
-				return END;
-			}
+			if (!lijstp) return END;
 			STRCPY(line, LINEMAX, lijstp->string);
-			p = line;
+			substitutedLine = line;		// reset substituted listing
 			lijstp = lijstp->next;
-		} else {
-			ReadBufLine(false);
-			p = line;
-			//_COUT "RF:" _CMDL rlcolon _CMDL line _ENDL;
 		}
-
+		char* p = line;
 		SkipBlanks(p);
-		if (*p == '.') {
-			++p;
-		}
+		if ('.' == *p) ++p;
 		if (cmphstr(p, "endif")) {
-			lp = ReplaceDefine(p); return ENDIF;
+			lp = ReplaceDefine(p);
+			substitutedLine = line;		// override substituted listing for ENDIF
+			return ENDIF;
+		} else if (cmphstr(p, "else")) {
+			lp = ReplaceDefine(p);
+			substitutedLine = line;		// override substituted listing for ELSE
+			ListFile();
+			return ELSE;
+		} else if (cmphstr(p, "endt") || cmphstr(p, "dephase") || cmphstr(p, "unphase")) {
+			lp = ReplaceDefine(p);
+			substitutedLine = line;		// override substituted listing for ENDT
+			return ENDTEXTAREA;
 		}
-		if (cmphstr(p, "else")) {
-			ListFile(); lp = ReplaceDefine(p); return ELSE;
-		}
-		if (cmphstr(p, "endt")) {
-			lp = ReplaceDefine(p); return ENDTEXTAREA;
-		}
-		if (cmphstr(p, "dephase")) {
-			lp = ReplaceDefine(p); return ENDTEXTAREA;
-		} // hmm??
-		if (cmphstr(p, "unphase")) {
-			lp = ReplaceDefine(p); return ENDTEXTAREA;
-		} // hmm??
 		ParseLineSafe();
 	}
-	Error("Unexpected end of file", 0, FATAL);
 	return END;
 }
 
 
-EReturn SkipFile(char* pp, const char* err) {
-	char* p;
+EReturn SkipFile() {
 	int iflevel = 0;
-	while (lijst || RL_Readed > 0 || !feof(FP_Input)) {
-		if (!IsRunning) {
-			return END;
-		}
+	while (IsRunning && (lijst || ReadLine())) {
 		if (lijst) {
-			if (!lijstp) {
-				return END;
-			}
+			if (!lijstp) return END;
 			STRCPY(line, LINEMAX, lijstp->string);
-			p = line;
+			substitutedLine = line;		// reset substituted listing
 			lijstp = lijstp->next;
-		} else {
-			ReadBufLine(false);
-			p = line;
-			//_COUT "SF:" _CMDL rlcolon _CMDL line _ENDL;
 		}
+		char* p = line;
 		SkipBlanks(p);
-		if (*p == '.') {
-			++p;
-		}
-		if (cmphstr(p, "if")) {
+		if ('.' == *p) ++p;
+		if (cmphstr(p, "if") || cmphstr(p, "ifn") || cmphstr(p, "ifused") ||
+			cmphstr(p, "ifnused") || cmphstr(p, "ifdef") || cmphstr(p, "ifndef")) {
 			++iflevel;
-		}
-		if (cmphstr(p, "ifn")) {
-			++iflevel;
-		}
-		if (cmphstr(p, "ifused")) {
-			++iflevel;
-		}
-		if (cmphstr(p, "ifnused")) {
-			++iflevel;
-		}
-		//if (cmphstr(p,"ifexist")) { ++iflevel; }
-		//if (cmphstr(p,"ifnexist")) { ++iflevel; }
-		if (cmphstr(p, "ifdef")) {
-			++iflevel;
-		}
-		if (cmphstr(p, "ifndef")) {
-			++iflevel;
-		}
-		if (cmphstr(p, "endif")) {
+		} else if (cmphstr(p, "endif")) {
 			if (iflevel) {
 				--iflevel;
 			} else {
 				lp = ReplaceDefine(p);
+				substitutedLine = line;		// override substituted listing for ENDIF
 				return ENDIF;
 			}
-		}
-		if (cmphstr(p, "else")) {
+		} else if (cmphstr(p, "else")) {
 			if (!iflevel) {
-				ListFile();
 				lp = ReplaceDefine(p);
+				substitutedLine = line;		// override substituted listing for ELSE
+				ListFile();
 				return ELSE;
 			}
 		}
-		ListFileSkip(line);
+		ListFile(true);
 	}
-	Error("Unexpected end of file", 0, FATAL);
 	return END;
 }
 
-
 int ReadLine(bool SplitByColon) {
-	if (!IsRunning) {
-		return 0;
-	}
-	int res = (RL_Readed > 0 || !feof(FP_Input));
+	if (!IsRunning || !ReadBufData()) return 0;
 	ReadBufLine(false, SplitByColon);
-	return res;
+	return 1;
 }
 
 int ReadFileToCStringsList(CStringsList*& f, const char* end) {
-	CStringsList* s,* l = NULL;
-	char* p;
-	f = NULL;
-	while (RL_Readed > 0 || !feof(FP_Input)) {
-		if (!IsRunning) {
-			return 0;
+	// f itself should be already NULL, not resetting it here
+	CStringsList** s = &f;
+	while (ReadLine(true)) {
+		char* p = line;
+		SkipBlanks(p);
+		if ('.' == *p) ++p;
+		if (cmphstr(p, end)) {
+			lp = ReplaceDefine(p);
+			return 1;
 		}
-		ReadBufLine(false);
-		p = line;
-
-		if (*p) {
-			SkipBlanks(p);
-			if (*p == '.') {
-				++p;
-			}
-			if (cmphstr(p, end)) {
-				lp = ReplaceDefine(p);
-				return 1;
-			}
-		}
-		s = new CStringsList(line, NULL);
-		if (!f) {
-			f = s;
-		} if (l) {
-			l->next = s;
-		}
-		l = s;
-		ListFileSkip(line);
+		*s = new CStringsList(line);
+		s = &((*s)->next);
+		ListFile(true);
 	}
-	Error("Unexpected end of file", 0, FATAL);
 	return 0;
 }
 
@@ -1630,7 +1346,7 @@ void WriteExp(char* n, aint v) {
 	STRCPY(ErrorLine, LINEMAX2, n);
 	STRCAT(ErrorLine, LINEMAX2, ": EQU ");
 	STRCAT(ErrorLine, LINEMAX2, "0x");
-	PrintHEX32(l, v); *l = 0;
+	PrintHex32(l, v); *l = 0;
 	STRCAT(ErrorLine, LINEMAX2, lnrs);
 	STRCAT(ErrorLine, LINEMAX2, "\n");
 	fputs(ErrorLine, FP_ExportFile);

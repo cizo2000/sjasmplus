@@ -30,10 +30,7 @@
 #define __SJDEFS
 
 // version string
-#define VERSION "1.10.4"
-
-// not used
-#define MAXPASSES 3
+#define VERSION "1.11.0"
 
 #define LASTPASS 3
 
@@ -50,6 +47,7 @@
 #endif
 
 #include <stack>
+#include <vector>
 #include <iostream>
 using std::cout;
 using std::cerr;
@@ -86,6 +84,10 @@ extern "C" {
 #define FUNTABSIZE 4096
 #endif
 #define aint long
+
+#ifndef PATH_MAX
+#define PATH_MAX	4096
+#endif
 
 // include all headers
 extern "C" {

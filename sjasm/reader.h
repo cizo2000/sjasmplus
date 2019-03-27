@@ -26,22 +26,29 @@
 
 */
 
-enum EDelimiterType { DT_NONE, DT_QUOTES, DT_APOSTROPHE, DT_ANGLE, DT_COUNT };
-#define DELIMITERS_B { ' ', '"', '\'', '<' }
-#define DELIMITERS_E { ' ', '"', '\'', '>' }
+#pragma once
 
-int White();
+#include <array>
+
+enum EDelimiterType { DT_NONE, DT_QUOTES, DT_APOSTROPHE, DT_ANGLE, DT_COUNT };
+enum EBracketType { BT_NONE, BT_ROUND, BT_CURLY, BT_SQUARE, BT_COUNT };
+
+bool White(const char c);
+bool White();
 void SkipParam(char*&);
+int SkipBlanks(char*& p);
 int SkipBlanks();
-void SkipBlanks(char*& p);
+void SkipToEol(char*& p);
 int NeedEQU();
 int NeedDEFL();
 int NeedField();
 char* GetID(char*& p);
 char* getinstr(char*& p);
 int comma(char*& p);
-int oparen(char*& p, char c);
-int cparen(char*& p);
+EBracketType OpenBracket(char*& p);
+int CloseBracket(char*& p);
+int oparenOLD(char*& p, char c);
+int cparenOLD(char*& p);
 char* getparen(char* p);
 int check8(aint val, bool error=true);
 int check8o(long val);
@@ -50,16 +57,22 @@ int check24(aint val, bool error=true);
 int need(char*& p, char c);
 int need(char*& p, const char* c);
 int needa(char*& p, const char* c1, int r1, const char* c2 = 0, int r2 = 0, const char* c3 = 0, int r3 = 0);
+bool GetNumericValue_ProcessLastError(const char* const srcLine);
+bool GetNumericValue_TwoBased(char*& p, const char* const pend, aint& val, const int shiftBase);
+bool GetNumericValue_IntBased(char*& p, const char* const pend, aint& val, const int base);
 int GetConstant(char*& op, aint& val);
 int GetCharConst(char*& p, aint& val);
-int GetCharConstChar(char*& op, aint& val);
-int GetCharConstCharSingle(char*& op, aint& val);
+int GetCharConstInDoubleQuotes(char*& op, aint& val);
+int GetCharConstInApostrophes(char*& op, aint& val);
+template <class strT> int GetCharConstAsString(char* & p, strT e[], int & ei, int max_ei = 128, int add = 0);
 int GetBytes(char*& p, int e[], int add, int dc);
+int GetBits(char*& p, int e[]);
+int GetBytesHexaText(char*& p, int e[]);
 int cmphstr(char*& p1, const char* p2);
 char* GetFileName(char*& p, bool convertslashes=false);
 EDelimiterType GetDelimiterOfLastFileName();	// DT_NONE if no GetFileName was called
-int needcomma(char*& p);
-int needbparen(char*& p);
 int islabchar(char p);
 EStructureMembers GetStructMemberId(char*& p);
-
+EDelimiterType DelimiterBegins(char*& src, const std::array<EDelimiterType, 3> delimiters, bool advanceSrc = true);
+EDelimiterType DelimiterAnyBegins(char*& src, bool advanceSrc = true);
+int GetMacroArgumentValue(char* & src, char* & dst);

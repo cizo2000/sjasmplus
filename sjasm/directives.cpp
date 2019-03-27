@@ -33,17 +33,23 @@
 CFunctionTable DirectivesTable;
 CFunctionTable DirectivesTable_dup;
 
-int ParseDirective(bool bol) {
+int ParseDirective(bool beginningOfLine)
+{
 	char* olp = lp;
-	char* n;
+
+	// if END/.END directive is at the beginning of line = ignore them (even with "--dirbol")
+	if (beginningOfLine && (cmphstr(lp, "end") || cmphstr(lp, ".end"))) {
+		lp = olp;
+		return 0;
+	}
+
 	bp = lp;
+	char* n;
+	aint val;
 	if (!(n = getinstr(lp))) {
 		if (*lp == '#' && *(lp + 1) == '#') {
 			lp += 2;
-			aint val;
-			synerr = 0; if (!ParseExpression(lp, val)) {
-							val = 4;
-						} synerr = 1;
+			if (!ParseExpressionNoSyntaxError(lp, val)) val = 4;
 			AddressOfMAP += ((~AddressOfMAP + 1) & (val - 1));
 			return 1;
 		} else {
@@ -51,56 +57,47 @@ int ParseDirective(bool bol) {
 		}
 	}
 
-	if (DirectivesTable.zoek(n, bol)) {
-		return 1;
+	if (DirectivesTable.zoek(n)) return 1;
+
+	// Only "." repeat directive remains, but that one can't start at beginning of line (without --dirbol)
+	if ((beginningOfLine && !Options::IsPseudoOpBOF) || ('.' != *n) || (!isdigit(n[1]) && *lp != '(')) {
+		lp = olp;		// alo "." must be followed by digit, or math expression in parentheses
+		return 0;		// otherwise just return
 	}
-	else if ((!bol || Options::IsPseudoOpBOF) && *n == '.' && (isdigit((unsigned char) * (n + 1)) || *lp == '(')) {
-		aint val;
-		if (isdigit((unsigned char) * (n + 1))) {
-			++n;
-			if (!ParseExpression(n, val)) {
-				Error("Syntax error", 0, CATCHALL); lp = olp; return 0;
-			}
-		} else if (*lp == '(') {
-			if (!ParseExpression(lp, val)) {
-				Error("Syntax error", 0, CATCHALL); lp = olp; return 0;
-			}
-		} else {
-			lp = olp; return 0;
-		}
-		if (val < 1) {
-			Error(".X must be positive integer", 0, CATCHALL); lp = olp; return 0;
-		}
 
-		int olistmacro;	char* ml;
-		char* pp = mline; *pp = 0;
-		STRCPY(pp, LINEMAX2, " ");
-
-		SkipBlanks(lp);
-		if (*lp) {
-			STRCAT(pp, LINEMAX2, lp);
-			lp += strlen(lp);
-		}
-		//_COUT pp _ENDL;
-		olistmacro = listmacro;
-		listmacro = 1;
-		ml = STRDUP(line);
-		if (ml == NULL) {
-			Error("No enough memory!", 0, FATAL);
-		}
-		do {
-			STRCPY(line, LINEMAX, pp);
-			ParseLineSafe();
-		} while (--val);
-		STRCPY(line, LINEMAX, ml);
-		listmacro = olistmacro;
-		donotlist = 1;
-
-		delete[] ml;
-		return 1;
+	// parse repeat-count either from n+1 (digits) or lp (parentheses)
+	++n;
+	if (!ParseExpression(isdigit(*n) ? n : lp, val)) {
+		lp = olp; Error("Syntax error", n, IF_FIRST);
+		return 0;
 	}
-	lp = olp;
-	return 0;
+	if (val < 1) {
+		lp = olp; ErrorInt(".X must be positive integer", val, IF_FIRST);
+		return 0;
+	}
+
+	// preserve original line buffer, and also the line to be repeated (at `lp`)
+	char* ml = STRDUP(line);
+	SkipBlanks();
+	char* pp = STRDUP(lp);
+	if (NULL == ml || NULL == pp) Error("Not enough memory!", NULL, FATAL);
+	++listmacro;
+	do {
+		line[0] = ' ';
+		STRCPY(line+1, LINEMAX-1, pp);	// reset `line` to the content which should be repeated
+		ParseLineSafe();			// and parse it
+		eolComment = NULL;			// switch OFF EOL-comment after first line
+	} while (--val);
+	// restore everything
+	STRCPY(line, LINEMAX, ml);
+	--listmacro;
+	donotlist = 1;
+	free(pp);
+	free(ml);
+	// make lp point at \0, as the repeating line was processed fully
+	lp = sline;
+	*sline = 0;
+	return 1;
 }
 
 int ParseDirective_REPT() {
@@ -111,9 +108,7 @@ int ParseDirective_REPT() {
 		if (*lp == '#' && *(lp + 1) == '#') {
 			lp += 2;
 			aint val;
-			synerr = 0; if (!ParseExpression(lp, val)) {
-							val = 4;
-						} synerr = 1;
+			if (!ParseExpressionNoSyntaxError(lp, val)) val = 4;
 			AddressOfMAP += ((~AddressOfMAP + 1) & (val - 1));
 			return 1;
 		} else {
@@ -128,172 +123,146 @@ int ParseDirective_REPT() {
 	return 0;
 }
 
-void dirBYTE() {
-	int teller, e[256];
-	teller = GetBytes(lp, e, 0, 0);
-	if (!teller) {
-		Error("BYTE/DEFB/DB with no arguments", 0); return;
+
+static void getBytesWithCheck(int add = 0, int dc = 0, bool dz = false) {
+	check8(add); add &= 255;
+	int dirDx[130];
+	if (GetBytes(lp, dirDx, add, dc)) {
+		EmitBytes(dirDx);
+		if (dz) EmitByte(0);
+	} else {
+		Error("no arguments");
 	}
-	EmitBytes(e);
+}
+
+void dirBYTE() {
+	getBytesWithCheck();
 }
 
 void dirDC() {
-	int teller, e[129];
-	teller = GetBytes(lp, e, 0, 1);
-	if (!teller) {
-		Error("DC with no arguments", 0); return;
-	}
-	EmitBytes(e);
+	getBytesWithCheck(0, 1);
 }
 
 void dirDZ() {
-	int teller, e[130];
-	teller = GetBytes(lp, e, 0, 0);
-	if (!teller) {
-		Error("DZ with no arguments", 0); return;
-	}
-	e[teller++] = 0; e[teller] = -1;
-	EmitBytes(e);
+	getBytesWithCheck(0, 0, true);
 }
 
 void dirABYTE() {
 	aint add;
-	int teller = 0,e[129];
-	if (ParseExpression(lp, add)) {
-		check8(add); add &= 255;
-		teller = GetBytes(lp, e, add, 0);
-		if (!teller) {
-			Error("ABYTE with no arguments", 0); return;
-		}
-		EmitBytes(e);
-	} else {
-		Error("[ABYTE] Expression expected", 0);
-	}
+	if (ParseExpression(lp, add))	getBytesWithCheck(add);
+	else							Error("[ABYTE] Expression expected");
 }
 
 void dirABYTEC() {
 	aint add;
-	int teller = 0,e[129];
-	if (ParseExpression(lp, add)) {
-		check8(add); add &= 255;
-		teller = GetBytes(lp, e, add, 1);
-		if (!teller) {
-			Error("ABYTEC with no arguments", 0); return;
-		}
-		EmitBytes(e);
-	} else {
-		Error("[ABYTEC] Expression expected", 0);
-	}
+	if (ParseExpression(lp, add))	getBytesWithCheck(add, 1);
+	else							Error("[ABYTEC] Expression expected");
 }
 
 void dirABYTEZ() {
 	aint add;
-	int teller = 0,e[129];
-	if (ParseExpression(lp, add)) {
-		check8(add); add &= 255;
-		teller = GetBytes(lp, e, add, 0);
-		if (!teller) {
-			Error("ABYTEZ with no arguments", 0); return;
-		}
-		e[teller++] = 0; e[teller] = -1;
-		EmitBytes(e);
-	} else {
-		Error("[ABYTEZ] Expression expected", 0);
-	}
+	if (ParseExpression(lp, add))	getBytesWithCheck(add, 0, true);
+	else							Error("[ABYTEZ] Expression expected");
 }
 
 void dirWORD() {
 	aint val;
-	int teller = 0,e[129];
-	SkipBlanks();
-	while (*lp) {
-		if (ParseExpression(lp, val)) {
+	int teller = 0, e[130];
+	do {
+		if (SkipBlanks()) {
+			Error("Expression expected", NULL, SUPPRESS);
+		} else if (ParseExpression(lp, val)) {
 			check16(val);
 			if (teller > 127) {
-				Error("Over 128 values in DW/DEFW/WORD", 0, FATAL);
+				Error("Over 128 values in DW/DEFW/WORD", NULL, SUPPRESS);
+				break;
 			}
 			e[teller++] = val & 65535;
 		} else {
-			Error("[DW/DEFW/WORD] Syntax error", lp, CATCHALL); return;
-		}
-		SkipBlanks();
-		if (*lp != ',') {
+			Error("[DW/DEFW/WORD] Syntax error", lp, SUPPRESS);
 			break;
 		}
-		++lp; SkipBlanks();
-	}
+	} while (comma(lp));
 	e[teller] = -1;
-	if (!teller) {
-		Error("DW/DEFW/WORD with no arguments", 0); return;
-	}
-	EmitWords(e);
+	if (teller) EmitWords(e);
+	else		Error("DW/DEFW/WORD with no arguments");
 }
 
 void dirDWORD() {
 	aint val;
-	int teller = 0,e[129 * 2];
-	SkipBlanks();
-	while (*lp) {
-		if (ParseExpression(lp, val)) {
+	int teller = 0, e[130 * 2];
+	do {
+		if (SkipBlanks()) {
+			Error("Expression expected", NULL, SUPPRESS);
+		} else if (ParseExpression(lp, val)) {
 			if (teller > 127) {
-				Error("[DWORD] Over 128 values", 0, FATAL);
+				Error("Over 128 values in DWORD", NULL, SUPPRESS);
+				break;
 			}
-			e[teller * 2] = val & 65535; e[teller * 2 + 1] = val >> 16; ++teller;
+			e[teller * 2] = val & 65535; e[teller * 2 + 1] = (val >> 16) & 0xFFFF; ++teller;
 		} else {
-			Error("[DWORD] Syntax error", lp, CATCHALL); return;
-		}
-		SkipBlanks();
-		if (*lp != ',') {
+			Error("[DWORD] Syntax error", lp, SUPPRESS);
 			break;
 		}
-		++lp; SkipBlanks();
-	}
+	} while (comma(lp));
 	e[teller * 2] = -1;
-	if (!teller) {
-		Error("DWORD with no arguments", 0); return;
-	}
-	EmitWords(e);
+	if (teller) EmitWords(e);
+	else		Error("DWORD with no arguments");
 }
 
 void dirD24() {
 	aint val;
-	int teller = 0,e[129 * 3];
-	SkipBlanks();
-	while (*lp) {
-		if (ParseExpression(lp, val)) {
+	int teller = 0, e[130 * 3];
+	do {
+		if (SkipBlanks()) {
+			Error("Expression expected", NULL, SUPPRESS);
+		} else if (ParseExpression(lp, val)) {
 			check24(val);
-			if (teller > 127) {
-				Error("[D24] Over 128 values", 0, FATAL);
+			if (teller > 127*3) {
+				Error("Over 128 values in D24", NULL, SUPPRESS);
+				break;
 			}
-			e[teller * 3] = val & 255; e[teller * 3 + 1] = (val >> 8) & 255; e[teller * 3 + 2] = (val >> 16) & 255; ++teller;
+			e[teller++] = val & 255; e[teller++] = (val >> 8) & 255; e[teller++] = (val >> 16) & 255;
 		} else {
-			Error("[D24] Syntax error", lp, CATCHALL); return;
-		}
-		SkipBlanks();
-		if (*lp != ',') {
+			Error("[D24] Syntax error", lp, SUPPRESS);
 			break;
 		}
-		++lp; SkipBlanks();
+	} while (comma(lp));
+	e[teller] = -1;
+	if (teller) EmitBytes(e);
+	else		Error("D24 with no arguments");
+}
+
+void dirDG() {
+	int dirDx[130];
+	if (GetBits(lp, dirDx)) {
+		EmitBytes(dirDx);
+	} else {
+		Error("no arguments");
 	}
-	e[teller * 3] = -1;
-	if (!teller) {
-		Error("D24 with no arguments", 0); return;
+}
+
+void dirDH() {
+	int dirDx[130];
+	if (GetBytesHexaText(lp, dirDx)) {
+		EmitBytes(dirDx);
+	} else {
+		Error("no arguments");
 	}
-	EmitBytes(e);
 }
 
 void dirBLOCK() {
 	aint teller,val = 0;
 	if (ParseExpression(lp, teller)) {
 		if ((signed) teller < 0) {
-			Warning("Negative BLOCK?", 0, LASTPASS);
+			Warning("Negative BLOCK?");
 		}
 		if (comma(lp)) {
 			ParseExpression(lp, val);
 		}
 		EmitBlock(val, teller);
 	} else {
-		Error("[BLOCK] Syntax Error", lp, CATCHALL);
+		Error("[BLOCK] Syntax Error", lp, IF_FIRST);
 	}
 }
 
@@ -303,18 +272,18 @@ void dirORG() {
 		if (ParseExpression(lp, val)) {
 			CurAddress = val;
 		} else {
-			Error("[ORG] Syntax error", lp, CATCHALL); return;
+			Error("[ORG] Syntax error", lp, IF_FIRST); return;
 		}
 		if (comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[ORG] Syntax error", lp, CATCHALL); return;
+				Error("[ORG] Syntax error", lp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[ORG] Negative page number are not allowed", lp); return;
-			} else if (val > Device->PagesCount - 1) {
+			} else if (Device->PagesCount <= val) {
 				char buf[LINEMAX];
-				SPRINTF1(buf, LINEMAX, "[ORG] Page number must be in range 0..%lu", Device->PagesCount - 1);
-			  	Error(buf, 0, CATCHALL); return;
+				SPRINTF1(buf, LINEMAX, "[ORG] Page number must be in range 0..%u", Device->PagesCount - 1);
+			  	Error(buf, NULL, IF_FIRST); return;
 			}
 			Slot->Page = Device->GetPage(val);
 			//Page = Slot->Page;
@@ -324,7 +293,7 @@ void dirORG() {
 		if (ParseExpression(lp, val)) {
 			CurAddress = val;
 		} else {
-			Error("[ORG] Syntax error", 0, CATCHALL);
+			Error("[ORG] Syntax error", lp, IF_FIRST);
 		}
 	}
 }
@@ -334,14 +303,14 @@ void dirDISP() {
 	if (ParseExpression(lp, val)) {
 		adrdisp = CurAddress;CurAddress = val;
 	} else {
-		Error("[DISP] Syntax error", 0, CATCHALL); return;
+		Error("[DISP] Syntax error", lp, IF_FIRST); return;
 	}
 	PseudoORG = 1;
 }
 
 void dirENT() {
 	if (!PseudoORG) {
-		Error("ENT should be after DISP", 0);return;
+		Error("ENT should be after DISP");return;
 	}
 	CurAddress = adrdisp;
 	PseudoORG = 0;
@@ -350,21 +319,22 @@ void dirENT() {
 void dirPAGE() {
 	aint val;
 	if (!DeviceID) {
-		Warning("PAGE only allowed in real device emulation mode (See DEVICE)", 0);
+		Warning("PAGE only allowed in real device emulation mode (See DEVICE)");
 		SkipParam(lp);
 		return;
 	}
 	if (!ParseExpression(lp, val)) {
-		Error("Syntax error", 0, CATCHALL);
+		Error("Syntax error", lp, IF_FIRST);
 		return;
 	}
 	if (val < 0) {
 		Error("[PAGE] Negative page number are not allowed", lp); return;
-	} else if (val > Device->PagesCount - 1) {
+	} else if (Device->PagesCount <= val) {
 		char buf[LINEMAX];
-		SPRINTF1(buf, LINEMAX, "[PAGE] Page number must be in range 0..%lu", Device->PagesCount - 1);
-		Error(buf, 0, CATCHALL); return;
+		SPRINTF1(buf, LINEMAX, "[PAGE] Page number must be in range 0..%u", Device->PagesCount - 1);
+		Error(buf, NULL, IF_FIRST); return;
 	}
+
 	Slot->Page = Device->GetPage(val);
 	CheckPage();
 }
@@ -372,20 +342,20 @@ void dirPAGE() {
 void dirSLOT() {
 	aint val;
 	if (!DeviceID) {
-		Warning("SLOT only allowed in real device emulation mode (See DEVICE)", 0);
+		Warning("SLOT only allowed in real device emulation mode (See DEVICE)");
 		SkipParam(lp);
 		return;
 	}
 	if (!ParseExpression(lp, val)) {
-		Error("Syntax error", 0, CATCHALL);
+		Error("Syntax error", lp, IF_FIRST);
 		return;
 	}
 	if (val < 0) {
 		Error("[SLOT] Negative slot number are not allowed", lp); return;
-	} else if (val > Device->SlotsCount - 1) {
+	} else if (Device->SlotsCount <= val) {
 		char buf[LINEMAX];
-		SPRINTF1(buf, LINEMAX, "[SLOT] Slot number must be in range 0..%lu", Device->SlotsCount - 1);
-		Error(buf, 0, CATCHALL); return;
+		SPRINTF1(buf, LINEMAX, "[SLOT] Slot number must be in range 0..%u", Device->SlotsCount - 1);
+		Error(buf, NULL, IF_FIRST); return;
 	}
 	Slot = Device->GetSlot(val);
 	Device->CurrentSlot = Slot->Number;
@@ -399,10 +369,10 @@ void dirMAP() {
 	if (ParseExpression(lp, val)) {
 		AddressOfMAP = val;
 	} else {
-		Error("[MAP] Syntax error", 0, CATCHALL);
+		Error("[MAP] Syntax error", lp, IF_FIRST);
 	}
 	if (IsLabelNotFound) {
-		Error("[MAP] Forward reference", 0, ALL);
+		Error("[MAP] Forward reference", NULL, ALL);
 	}
 }
 
@@ -410,52 +380,20 @@ void dirENDMAP() {
 	if (AddressList) {
 		AddressOfMAP = AddressList->val; AddressList = AddressList->next;
 	} else {
-		Error("ENDMAP without MAP", 0);
+		Error("ENDMAP without MAP");
 	}
 }
 
 void dirALIGN() {
-	aint val;
-	aint byte;
-	bool noexp=false;
-	if (!ParseExpression(lp, val)) {
-		noexp = true;
-		val = 4;
-	}
-	switch (val) {
-	case 1:
-		break;
-	case 2:
-	case 4:
-	case 8:
-	case 16:
-	case 32:
-	case 64:
-	case 128:
-	case 256:
-	case 512:
-	case 1024:
-	case 2048:
-	case 4096:
-	case 8192:
-	case 16384:
-	case 32768:
-		val = (~CurAddress + 1) & (val - 1);
-		if (!noexp && comma(lp)) {
-			if (!ParseExpression(lp, byte)) {
-				EmitBlock(0, val, true);
-			} else if (byte > 255 || byte < 0) {
-				Error("[ALIGN] Illegal align byte", 0); break;
-			} else {
-				EmitBlock(byte, val, false);
-			}
-		} else {
-			EmitBlock(0, val, true);
-		}
-		break;
-	default:
-		Error("[ALIGN] Illegal align", 0); break;
-	}
+	// default alignment is 4, default filler is "0/none" (if not specified in directive explicitly)
+	aint val, fill;
+	ParseAlignArguments(lp, val, fill);
+	if (-1 == val) val = 4;
+	// calculate how many bytes has to be filled to reach desired alignment
+	aint len = (~CurAddress + 1) & (val - 1);
+	if (len < 1) return;		// nothing to fill, already aligned
+	if (-1 == fill) EmitBlock(0, len, true);
+	else			EmitBlock(fill, len, false);
 }
 
 /*void dirMODULE() {
@@ -500,20 +438,20 @@ void dirMODULE() {
 		{
 			ModuleName = STRDUP(n);
 			if (ModuleName == NULL) {
-				Error("Not enough memory!", 0, FATAL);
+				Error("Not enough memory!", NULL, FATAL);
 			}
 		}
 		else
 		{
 			ModuleName = (char*)realloc(ModuleName,strlen(n)+strlen(ModuleName)+2);
 			if (ModuleName == NULL) {
-				Error("Not enough memory!", 0, FATAL);
+				Error("Not enough memory!", NULL, FATAL);
 			}
 			STRCAT(ModuleName, sizeof("."), ".");
 			STRCAT(ModuleName, sizeof(n), n);
 		}
 	} else {
-		Error("[MODULE] Syntax error", 0, CATCHALL);
+		Error("[MODULE] Syntax error", lp, IF_FIRST);
 	}
 
 	if (ModuleName != NULL) {
@@ -539,30 +477,22 @@ void dirENDMODULE() {
 		if (ModuleList != NULL && ModuleList->string != NULL) {
 			ModuleName = STRDUP(ModuleList->string);
 			if (ModuleName == NULL) {
-				Error("No enough memory!", 0, FATAL);
+				Error("No enough memory!", NULL, FATAL);
 			}
 		} else {
 			ModuleName = NULL;
 		}
 	} else {
-		Error("ENDMODULE without MODULE", 0);
+		Error("ENDMODULE without MODULE");
 	}
-}
-
-void dirZ80() {
-	GetCPUInstruction = Z80::GetOpCode;
 }
 
 void dirEND() {
 	char* p = lp;
 	aint val;
 	if (ParseExpression(lp, val)) {
-		if (val > 65535 || val < 0) {
-			char buf[LINEMAX];
-			SPRINTF1(buf, LINEMAX, "[END] Invalid address: %lu", val);
-			Error(buf, 0, CATCHALL); return;
-		}
-		StartAddress = val;
+		if (val > 65535 || val < 0) ErrorInt("[END] Invalid address", IF_FIRST);
+		else 						StartAddress = val;
 	} else {
 		lp = p;
 	}
@@ -573,15 +503,12 @@ void dirEND() {
 void dirSIZE() {
 	aint val;
 	if (!ParseExpression(lp, val)) {
-		Error("[SIZE] Syntax error", bp, CATCHALL); return;
-	}
-	if (pass == LASTPASS) {
+		Error("[SIZE] Syntax error", bp, IF_FIRST);
 		return;
 	}
-	if (size != (aint) - 1) {
-		Error("[SIZE] Multiple sizes?", 0); return;
-	}
-	size = val;
+	if (LASTPASS != pass) return;	// only active during final pass
+	if (-1L == size) size = val;	// first time set
+	else if (size != val) ErrorInt("[SIZE] Different size than previous", size);	// just check it's same
 }
 
 void dirINCBIN() {
@@ -593,16 +520,16 @@ void dirINCBIN() {
 	if (comma(lp)) {
 		if (!comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCBIN] Syntax error", bp, CATCHALL); return;
+				Error("[INCBIN] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCBIN] Negative values are not allowed", bp); return;
 			}
 			offset = val;
-		}
+		} else --lp;		// there was second comma right after, reread it
 		if (comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCBIN] Syntax error", bp, CATCHALL); return;
+				Error("[INCBIN] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCBIN] Negative values are not allowed", bp); return;
@@ -618,23 +545,23 @@ void dirINCHOB() {
 	aint val;
 	char* fnaam, * fnaamh;
 	unsigned char len[2];
-	int offset = 17,length = -1,res;
+	int offset = 0,length = -1;
 	FILE* ff;
 
 	fnaam = GetFileName(lp);
 	if (comma(lp)) {
 		if (!comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCHOB] Syntax error", bp, CATCHALL); return;
+				Error("[INCHOB] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCHOB] Negative values are not allowed", bp); return;
 			}
 			offset += val;
-		}
+		} else --lp;		// there was second comma right after, reread it
 		if (comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCHOB] Syntax error", bp, CATCHALL); return;
+				Error("[INCHOB] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCHOB] Negative values are not allowed", bp); return;
@@ -647,17 +574,15 @@ void dirINCHOB() {
 	if (!FOPEN_ISOK(ff, fnaamh, "rb")) {
 		Error("[INCHOB] Error opening file", fnaam, FATAL);
 	}
-	if (fseek(ff, 0x0b, 0)) {
+	if (fseek(ff, 0x0b, 0) || 2 != fread(len, 1, 2, ff)) {
 		Error("[INCHOB] Hobeta file has wrong format", fnaam, FATAL);
-	}
-	res = fread(len, 1, 2, ff);
-	if (res != 2) {
-		Error("[INCHOB] Hobeta file has wrong format", fnaam, FATAL);
-	}
-	if (length == -1) {
-		length = len[0] + (len[1] << 8);
 	}
 	fclose(ff);
+	if (length == -1) {
+		// calculate remaining length of the file (from the specified offset)
+		length = len[0] + (len[1] << 8) - offset;
+	}
+	offset += 17;		// adjust offset (skip HOB header)
 	BinIncFile(fnaam, offset, length);
 	delete[] fnaam;
 	delete[] fnaamh;
@@ -675,18 +600,18 @@ void dirINCTRD() {
 		if (!comma(lp)) {
 			fnaamh = GetFileName(lp);
 			if (!*fnaamh) {
-				Error("[INCTRD] Syntax error", bp, CATCHALL); return;
+				Error("[INCTRD] Syntax error", bp, IF_FIRST); return;
 			}
 		} else {
-			Error("[INCTRD] Syntax error", bp, CATCHALL); return;
+			Error("[INCTRD] Syntax error", bp, IF_FIRST); return;
 		}
 	} else {
-		Error("[INCTRD] Syntax error", bp, CATCHALL); return; //is this ok?
+		Error("[INCTRD] Syntax error", bp, IF_FIRST); return; //is this ok?
 	}
 	if (comma(lp)) {
 		if (!comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCTRD] Syntax error", bp, CATCHALL); return;
+				Error("[INCTRD] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCTRD] Negative values are not allowed", bp); return;
@@ -695,7 +620,7 @@ void dirINCTRD() {
 		}
 		if (comma(lp)) {
 			if (!ParseExpression(lp, val)) {
-				Error("[INCTRD] Syntax error", bp, CATCHALL); return;
+				Error("[INCTRD] Syntax error", bp, IF_FIRST); return;
 			}
 			if (val < 0) {
 				Error("[INCTRD] Negative values are not allowed", bp); return;
@@ -732,14 +657,14 @@ void dirINCTRD() {
 		res = fread(hdr, 1, 16, ff);
 		hdr[16] = 0;
 		if (res != 16) {
-			Error("[INCTRD] Read error", fnaam, CATCHALL); return;
+			Error("[INCTRD] Read error", fnaam, IF_FIRST); return;
 		}
 		if (strstr(hdr, hobeta) != NULL) {
 			i = 0; break;
 		}
 	}
 	if (i) {
-		Error("[INCTRD] File not found in TRD image", fnaamh, CATCHALL); return;
+		Error("[INCTRD] File not found in TRD image", fnaamh, IF_FIRST); return;
 	}
 	if (length > 0) {
 		if (offset == -1) {
@@ -775,7 +700,7 @@ void dirSAVESNA() {
 
 	if (!DeviceID) {
 		if (pass == LASTPASS) {
-			Error("SAVESNA only allowed in real device emulation mode (See DEVICE)", 0);
+			Error("SAVESNA only allowed in real device emulation mode (See DEVICE)");
 		}
 		exec = false;
 	} else if (pass != LASTPASS) {
@@ -783,7 +708,7 @@ void dirSAVESNA() {
 	}
 
 	if (exec && !IsZXSpectrumDevice(DeviceID)) {
-		Error("[SAVESNA] Device must be ZXSPECTRUM48 or ZXSPECTRUM128.", 0);
+		Error("[SAVESNA] Device must be ZXSPECTRUM48 or ZXSPECTRUM128.");
 		exec = false;
 	}
 
@@ -811,7 +736,7 @@ void dirSAVESNA() {
 	}
 
 	if (exec && !SaveSNA_ZX(fnaam, start)) {
-		Error("[SAVESNA] Error writing file (Disk full?)", bp, CATCHALL); return;
+		Error("[SAVESNA] Error writing file (Disk full?)", bp, IF_FIRST); return;
 	}
 
 	delete[] fnaam;
@@ -826,7 +751,7 @@ void dirEMPTYTAP() {
 
 	fnaam = GetFileName(lp);
 	if (!*fnaam) {
-		Error("[EMPTYTAP] Syntax error", bp, CATCHALL); return;
+		Error("[EMPTYTAP] Syntax error", bp, IF_FIRST); return;
 	}
 	TAP_SaveEmpty(fnaam);
 	delete[] fnaam;
@@ -847,7 +772,7 @@ void dirSAVETAP() {
 
 	if (!DeviceID) {
 		if (pass == LASTPASS) {
-			Error("SAVETAP only allowed in real device emulation mode (See DEVICE)", 0);
+			Error("SAVETAP only allowed in real device emulation mode (See DEVICE)");
 		}
 		exec = false;
 	} else if (pass != LASTPASS) {
@@ -938,7 +863,7 @@ void dirSAVETAP() {
 
 								if (comma(lp)) {
 									if (!ParseExpression(lp, val)) {
-										Error("[SAVETAP] Syntax error", bp, CATCHALL); return;
+										Error("[SAVETAP] Syntax error", bp, IF_FIRST); return;
 									}
 									if (val < 0) {
 										Error("[SAVETAP] Negative values are not allowed", bp, PASS3); return;
@@ -949,7 +874,7 @@ void dirSAVETAP() {
 								}
 								if (comma(lp)) {
 									if (!ParseExpression(lp, val)) {
-										Error("[SAVETAP] Syntax error", bp, CATCHALL); return;
+										Error("[SAVETAP] Syntax error", bp, IF_FIRST); return;
 									}
 									if (val < 0) {
 										Error("[SAVETAP] Negative values are not allowed", bp, PASS3); return;
@@ -1000,10 +925,10 @@ void dirSAVETAP() {
 		}
 
 		if (!done) {
-			Error("[SAVETAP] Error writing file", bp, CATCHALL);
+			Error("[SAVETAP] Error writing file", bp, IF_FIRST);
 		}
 	} else if (exec) {
-		Error("[SAVETAP] Device must be defined.", 0);
+		Error("[SAVETAP] Device must be defined.");
 	}
 
 	if (fnaamh) {
@@ -1017,7 +942,7 @@ void dirSAVEBIN() {
 
 	if (!DeviceID) {
 		if (pass == LASTPASS) {
-			Error("SAVEBIN only allowed in real device emulation mode (See DEVICE)", 0);
+			Error("SAVEBIN only allowed in real device emulation mode (See DEVICE)");
 		}
 		exec = false;
 	} else if (pass != LASTPASS) {
@@ -1057,7 +982,7 @@ void dirSAVEBIN() {
 	}
 
 	if (exec && !SaveBinary(fnaam, start, length)) {
-		Error("[SAVEBIN] Error writing file (Disk full?)", bp, CATCHALL); return;
+		Error("[SAVEBIN] Error writing file (Disk full?)", bp, IF_FIRST); return;
 	}
 	delete[] fnaam;
 }
@@ -1075,7 +1000,7 @@ void dirSAVEHOB() {
 
 	if (!DeviceID) {
 		if (pass == LASTPASS) {
-			Error("SAVEHOB only allowed in real device emulation mode (See DEVICE)", 0);
+			Error("SAVEHOB only allowed in real device emulation mode (See DEVICE)");
 		}
 		exec = false;
 	} else if (pass != LASTPASS) {
@@ -1123,7 +1048,7 @@ void dirSAVEHOB() {
 		Error("[SAVEHOB] Syntax error. No parameters", bp, PASS3); return;
 	}
 	if (exec && !SaveHobeta(fnaam, fnaamh, start, length)) {
-		Error("[SAVEHOB] Error writing file (Disk full?)", bp, CATCHALL); return;
+		Error("[SAVEHOB] Error writing file (Disk full?)", bp, IF_FIRST); return;
 	}
 	delete[] fnaam;
 	delete[] fnaamh;
@@ -1138,7 +1063,7 @@ void dirEMPTYTRD() {
 
 	fnaam = GetFileName(lp);
 	if (!*fnaam) {
-		Error("[EMPTYTRD] Syntax error", bp, CATCHALL); return;
+		Error("[EMPTYTRD] Syntax error", bp, IF_FIRST); return;
 	}
 	TRD_SaveEmpty(fnaam);
 	delete[] fnaam;
@@ -1155,7 +1080,7 @@ void dirSAVETRD() {
 
 	if (!DeviceID) {
 		if (pass == LASTPASS) {
-			Error("SAVETRD only allowed in real device emulation mode (See DEVICE)", 0);
+			Error("SAVETRD only allowed in real device emulation mode (See DEVICE)");
 		}
 		exec = false;
 	} else if (pass != LASTPASS) {
@@ -1229,7 +1154,7 @@ void dirENCODING() {
 	char* opt = GetFileName(lp);
 	char* opt2 = opt;
 	if (!(*opt)) {
-		Error("[ENCODING] Syntax error. No parameters", bp, CATCHALL); return;
+		Error("[ENCODING] Syntax error. No parameters", bp, IF_FIRST); return;
 	}
 	do {
 		*opt2 = (char) tolower(*opt2);
@@ -1244,12 +1169,12 @@ void dirENCODING() {
 		delete[] opt;
 		return;
 	}
-	Error("[ENCODING] Syntax error. Bad parameter", bp, CATCHALL); delete[] opt;return;
+	Error("[ENCODING] Syntax error. Bad parameter", bp, IF_FIRST); delete[] opt;return;
 }
 
 void dirLABELSLIST() {
 	if (!DeviceID) {
-		Error("LABELSLIST only allowed in real device emulation mode (See DEVICE)", 0);
+		Error("LABELSLIST only allowed in real device emulation mode (See DEVICE)");
 	}
 
 	if (pass != 1 || !DeviceID) {
@@ -1257,7 +1182,7 @@ void dirLABELSLIST() {
 	}
 	char* opt = GetFileName(lp);
 	if (!(*opt)) {
-		Error("[LABELSLIST] Syntax error. No parameters", bp, CATCHALL); return;
+		Error("[LABELSLIST] Syntax error. No parameters", bp, IF_FIRST); return;
 	}
 	STRCPY(Options::UnrealLabelListFName, LINEMAX, opt);
 	delete[] opt;
@@ -1267,178 +1192,112 @@ void dirLABELSLIST() {
 
 }*/
 
-void dirIF() {
-	aint val;
-	IsLabelNotFound = 0;
-	/*if (!ParseExpression(p,val)) { Error("Syntax error",0,CATCHALL); return; }*/
-	if (!ParseExpression(lp, val)) {
-		Error("[IF] Syntax error", 0, CATCHALL); return;
-	}
-	/*if (IsLabelNotFound) Error("Forward reference",0,ALL);*/
-	if (IsLabelNotFound) {
-		Error("[IF] Forward reference", 0, ALL);
-	}
+// error message templates for IF**some** directives
+constexpr static size_t dirIfErrorsN = 2, dirIfErrorsSZ = 48;
+const static char dirIfErrorsTxtSrc[dirIfErrorsN][dirIfErrorsSZ] = {
+	{ "[%s] No ENDIF" },
+	{ "[%s] one ELSE only expected" }
+};
 
-	if (val) {
-		ListFile();
-		switch (ReadFile(lp, "[IF] No endif")) {
-		case ELSE:
-			if (SkipFile(lp, "[IF] No endif") != ENDIF) {
-				Error("[IF] No endif", 0);
-			}
-			break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IF] No endif!", 0);
-			break;
-		}
-	} else {
-		ListFile();
-		switch (SkipFile(lp, "[IF] No endif")) {
-		case ELSE:
-			if (ReadFile(lp, "[IF] No endif") != ENDIF) {
-				Error("[IF] No endif", 0);
-			}
-			break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IF] No endif!", 0);
-			break;
+// main IF implementation parsing/skipping part of source depending on "val", handling ELSE/ENDIF
+static void dirIfInternal(const char* dirName, aint val) {
+	// set up error messages for the particular pseudo-op
+	char errorsTxt[dirIfErrorsN][dirIfErrorsSZ];
+	for (size_t i = 0; i < dirIfErrorsN; ++i) {
+		SPRINTF1(errorsTxt[i], dirIfErrorsSZ, dirIfErrorsTxtSrc[i], dirName);
+	}
+	// do the IF**some** part
+	ListFile();
+	EReturn ret = END;
+	int elseCounter = 0;
+	while (ENDIF != ret) {
+		switch (ret = val ? ReadFile() : SkipFile()) {
+			case ELSE:
+				if (elseCounter++) Warning(errorsTxt[1]);
+				val = !val;
+				break;
+			case ENDIF:
+				break;
+			default:
+				if (IsRunning) Error(errorsTxt[0]);
+				donotlist=!IsRunning;		// do the listing only if still running
+				return;
 		}
 	}
 }
 
-void dirIFN() {
-	aint val;
+// IF and IFN internal helper, to evaluate expression
+static bool dirIfIfn(aint & val) {
 	IsLabelNotFound = 0;
 	if (!ParseExpression(lp, val)) {
-		Error("[IFN] Syntax error", 0, CATCHALL); return;
+		Error("[IF/IFN] Syntax error", lp, IF_FIRST);
+		return false;
 	}
-	if (IsLabelNotFound) {
-		Error("[IFN] Forward reference", 0, ALL);
-	}
-
-	if (!val) {
-		ListFile();
-		switch (ReadFile(lp, "[IFN] No endif")) {
-		case ELSE:
-			if (SkipFile(lp, "[IFN] No endif") != ENDIF) {
-				Error("[IFN] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFN] No endif!", 0); break;
-		}
-	} else {
-		ListFile();
-		switch (SkipFile(lp, "[IFN] No endif")) {
-		case ELSE:
-			if (ReadFile(lp, "[IFN] No endif") != ENDIF) {
-				Error("[IFN] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFN] No endif!", 0); break;
-		}
-	}
+	if (IsLabelNotFound) Error("[IF/IFN] Forward reference");
+	return true;
 }
 
-void dirIFUSED() {
-	char* id;
-	if (((id = GetID(lp)) == NULL || *id == 0) && LastParsedLabel == NULL) {
-		Error("[IFUSED] Syntax error", 0, CATCHALL);
-		return;
+static void dirIF() {
+	aint val;
+	if (dirIfIfn(val)) dirIfInternal("IF", val);
+}
+
+static void dirIFN() {
+	aint val;
+	if (dirIfIfn(val)) dirIfInternal("IFN", !val);
+}
+
+// IFUSED and IFNUSED internal helper, to parse label
+static bool dirIfusedIfnused(char* & id) {
+	SkipBlanks();
+	bool global = ('@' == *lp) && ++lp;		// if global marker, remember it + skip it
+	if ( (((id = GetID(lp)) == NULL || *id == 0) && LastParsedLabel == NULL) || !SkipBlanks()) {
+		Error("[IFUSED] Syntax error", bp, SUPPRESS);
+		return false;
 	}
 	if (id == NULL || *id == 0) {
 		id = LastParsedLabel;
 	} else {
-		id = ValidateLabel(id, 0);
-		if (id == NULL) {
-			Error("[IFUSED] Invalid label name", 0, CATCHALL);
-			return;
-		}
+		id = ValidateLabel(id, global ? VALIDATE_LABEL_AS_GLOBAL : 0);
+		if (id == NULL) Error("[IFUSED] Invalid label name", bp, IF_FIRST);
 	}
-
-	if (LabelTable.IsUsed(id)) {
-		ListFile();
-		switch (ReadFile(lp, "[IFUSED] No endif")) {
-		case ELSE:
-			if (SkipFile(lp, "[IFUSED] No endif") != ENDIF) {
-				Error("[IFUSED] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFUSED] No endif!", 0); break;
-		}
-	} else {
-		ListFile();
-		switch (SkipFile(lp, "[IFUSED] No endif")) {
-		case ELSE:
-			if (ReadFile(lp, "[IFUSED] No endif") != ENDIF) {
-				Error("[IFUSED] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFUSED] No endif!", 0); break;
-		}
-	}
+	return NULL != id;
 }
 
-void dirIFNUSED() {
+static void dirIFUSED() {
 	char* id;
-	if (((id = GetID(lp)) == NULL || *id == 0) && LastParsedLabel == NULL) {
-		Error("[IFUSED] Syntax error", 0, CATCHALL);
-		return;
-	}
-	if (id == NULL || *id == 0) {
-		id = LastParsedLabel;
-	} else {
-		id = ValidateLabel(id, 0);
-		if (id == NULL) {
-			Error("[IFUSED] Invalid label name", 0, CATCHALL);
-			return;
-		}
-	}
+	if (dirIfusedIfnused(id)) dirIfInternal("IFUSED", LabelTable.IsUsed(id));
+}
 
-	if (!LabelTable.IsUsed(id)) {
-		ListFile();
-		switch (ReadFile(lp, "[IFNUSED] No endif")) {
-		case ELSE:
-			if (SkipFile(lp, "[IFNUSED] No endif") != ENDIF) {
-				Error("[IFNUSED] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFNUSED] No endif!", 0); break;
-		}
+static void dirIFNUSED() {
+	char* id;
+	if (dirIfusedIfnused(id)) dirIfInternal("IFNUSED", !LabelTable.IsUsed(id));
+}
+
+static void dirIFDEF() {
+	char* id;
+	if ((id = GetID(lp)) && *id) {
+		dirIfInternal("IFDEF", DefineTable.FindDuplicate(id));
 	} else {
-		ListFile();
-		switch (SkipFile(lp, "[IFNUSED] No endif")) {
-		case ELSE:
-			if (ReadFile(lp, "[IFNUSED] No endif") != ENDIF) {
-				Error("[IFNUSED] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-		default:
-			Error("[IFNUSED] No endif!", 0); break;
-		}
+		Error("[IFDEF] Illegal identifier", bp);
 	}
 }
 
-void dirELSE() {
-	Error("ELSE without IF/IFN/IFUSED/IFNUSED/IFDEF/IFNDEF", 0);
+static void dirIFNDEF() {
+	char* id;
+	if ((id = GetID(lp)) && *id) {
+		dirIfInternal("IFNDEF", !DefineTable.FindDuplicate(id));
+	} else {
+		Error("[IFNDEF] Illegal identifier", bp);
+	}
 }
 
-void dirENDIF() {
-	Error("ENDIF without IF/IFN/IFUSED/IFNUSED/IFDEF/IFNDEF", 0);
+static void dirELSE() {
+	Error("ELSE without IF/IFN/IFUSED/IFNUSED/IFDEF/IFNDEF");
+}
+
+static void dirENDIF() {
+	Error("ENDIF without IF/IFN/IFUSED/IFNUSED/IFDEF/IFNDEF");
 }
 
 /*void dirENDTEXTAREA() {
@@ -1468,7 +1327,7 @@ void dirOUTPUT() {
 		} else if (modechar == 'a') {
 			mode = OUTPUT_APPEND;
 		} else {
-			Error("Syntax error", bp, CATCHALL);
+			Error("Syntax error", bp, IF_FIRST);
 		}
 	}
 	//Options::NoDestinationFile = false;
@@ -1480,7 +1339,6 @@ void dirOUTPUT() {
 
 void dirOUTEND()
 {
-	// if (!FP_Output) {Error("OUTEND without OUTPUT", bp, PASS3); return;}
 	if (pass == LASTPASS) CloseDest();
 }
 
@@ -1514,10 +1372,11 @@ void dirDEFINE() {
 	char* id;
 
 	if (!(id = GetID(lp))) {
-		Error("[DEFINE] Illegal syntax", 0); return;
+		Error("[DEFINE] Illegal syntax"); return;
 	}
 
 	DefineTable.Add(id, lp, 0);
+	substitutedLine = line;		// override substituted listing for DEFINE
 
 	*(lp) = 0;
 }
@@ -1526,7 +1385,7 @@ void dirUNDEFINE() {
 	char* id;
 
 	if (!(id = GetID(lp)) && *lp != '*') {
-		Error("[UNDEFINE] Illegal syntax", 0); return;
+		Error("[UNDEFINE] Illegal syntax"); return;
 	}
 
 	if (*lp == '*') {
@@ -1538,110 +1397,8 @@ void dirUNDEFINE() {
 	} else if (LabelTable.Find(id)) {
 		LabelTable.Remove(id);
 	} else {
-		Warning("[UNDEFINE] Identifier not found", 0); return;
+		Warning("[UNDEFINE] Identifier not found", id); return;
 	}
-}
-
-void dirIFDEF() {
-	/*char *p=line,*id;*/
-	char* id;
-	/* (this was cutted)
-	while ('o') {
-	  if (!*p) Error("ifdef error",0,FATAL);
-	  if (*p=='.') { ++p; continue; }
-	  if (*p=='i' || *p=='I') break;
-	  ++p;
-	}
-	if (!cmphstr(p,"ifdef")) Error("ifdef error",0,FATAL);
-	*/
-	EReturn res;
-	if (!(id = GetID(lp))) {
-		Error("[IFDEF] Illegal identifier", 0); return;
-	}
-
-	if (DefineTable.FindDuplicate(id)) {
-		ListFile();
-		/*switch (res=ReadFile()) {*/
-		switch (res = ReadFile(lp, "[IFDEF] No endif")) {
-			/*case ELSE: if (SkipFile()!=ENDIF) Error("No endif",0); break;*/
-		case ELSE:
-			if (SkipFile(lp, "[IFDEF] No endif") != ENDIF) {
-				Error("[IFDEF] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-			/*default: Error("No endif!",0); break;*/
-		default:
-			Error("[IFDEF] No endif!", 0); break;
-		}
-	} else {
-		ListFile();
-		/*switch (res=SkipFile()) {*/
-		switch (res = SkipFile(lp, "[IFDEF] No endif")) {
-			/*case ELSE: if (ReadFile()!=ENDIF) Error("No endif",0); break;*/
-		case ELSE:
-			if (ReadFile(lp, "[IFDEF] No endif") != ENDIF) {
-				Error("[IFDEF] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-			/*default: Error(" No endif!",0); break;*/
-		default:
-			Error("[IFDEF] No endif!", 0); break;
-		}
-	}
-	/**lp=0;*/
-}
-
-void dirIFNDEF() {
-	/*char *p=line,*id;*/
-	char* id;
-	/* (this was cutted)
-	while ('o') {
-	  if (!*p) Error("ifndef error",0,FATAL);
-	  if (*p=='.') { ++p; continue; }
-	  if (*p=='i' || *p=='I') break;
-	  ++p;
-	}
-	if (!cmphstr(p,"ifndef")) Error("ifndef error",0,FATAL);
-	*/
-	EReturn res;
-	if (!(id = GetID(lp))) {
-		Error("[IFNDEF] Illegal identifier", 0); return;
-	}
-
-	if (!DefineTable.FindDuplicate(id)) {
-		ListFile();
-		/*switch (res=ReadFile()) {*/
-		switch (res = ReadFile(lp, "[IFNDEF] No endif")) {
-			/*case ELSE: if (SkipFile()!=ENDIF) Error("No endif",0); break;*/
-		case ELSE:
-			if (SkipFile(lp, "[IFNDEF] No endif") != ENDIF) {
-				Error("[IFNDEF] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-			/*default: Error("No endif!",0); break;*/
-		default:
-			Error("[IFNDEF] No endif!", 0); break;
-		}
-	} else {
-		ListFile();
-		/*switch (res=SkipFile()) {*/
-		switch (res = SkipFile(lp, "[IFNDEF] No endif")) {
-			/*case ELSE: if (ReadFile()!=ENDIF) Error("No endif",0); break;*/
-		case ELSE:
-			if (ReadFile(lp, "[IFNDEF] No endif") != ENDIF) {
-				Error("[IFNDEF] No endif", 0);
-			} break;
-		case ENDIF:
-			break;
-			/*default: Error("No endif!",0); break;*/
-		default:
-			Error("[IFNDEF] No endif!", 0); break;
-		}
-	}
-	/**lp=0;*/
 }
 
 void dirEXPORT() {
@@ -1649,7 +1406,7 @@ void dirEXPORT() {
 	char* n, * p;
 
 	if (!Options::ExportFName[0]) {
-		STRCPY(Options::ExportFName, LINEMAX, SourceFNames[CurrentSourceFName]);
+		STRCPY(Options::ExportFName, LINEMAX, filename);
 		if (!(p = strchr(Options::ExportFName, '.'))) {
 			p = Options::ExportFName;
 		} else {
@@ -1659,7 +1416,7 @@ void dirEXPORT() {
 		Warning("[EXPORT] Filename for exportfile was not indicated. Output will be in", Options::ExportFName);
 	}
 	if (!(n = p = GetID(lp))) {
-		Error("[EXPORT] Syntax error", lp, CATCHALL); return;
+		Error("[EXPORT] Syntax error", lp, IF_FIRST); return;
 	}
 	if (pass != LASTPASS) {
 		return;
@@ -1674,148 +1431,75 @@ void dirEXPORT() {
 }
 
 void dirDISPLAY() {
-	char decprint = 0;
-	char e[LINEMAX];
+	char decprint = 'H';
+	char e[LINEMAX], optionChar;
 	char* ep = e;
 	aint val;
-	int t = 0;
-	while (1) {
-		SkipBlanks(lp);
-		if (!*lp) {
-			Error("[DISPLAY] Expression expected", 0, PASS3); break;
+	do {
+		if (SkipBlanks()) {
+			Error("[DISPLAY] Expression expected");
+			break;
 		}
-		if (t == LINEMAX - 1) {
-			Error("[DISPLAY] Too many arguments", lp, PASS3); break;
-		}
-		if (*(lp) == '/') {
-			++lp;
-			switch (*(lp++)) {
-			case 'A':
-			case 'a':
-				decprint = 2;break;
-			case 'D':
-			case 'd':
-				decprint = 1;break;
-			case 'H':
-			case 'h':
-				decprint = 0;break ;
-			case 'L':
-			case 'l':
-				break ;
-			case 'T':
-			case 't':
+		if (*lp == '/') {
+			switch (optionChar = toupper(lp[1])) {
+			case 'A': case 'D': case 'H':	// known options, switching hex+dec / dec / hex mode
+				decprint = optionChar;
+				break;
+			case 'L': case 'T':				// silently ignored options (legacy compatibility)
 				break ;
 			default:
-				Error("[DISPLAY] Syntax error", line, PASS3);return;
+				Error("[DISPLAY] Syntax error, unknown option", lp, SUPPRESS);
+				return;
 			}
-			SkipBlanks(lp);
-
-			if ((*(lp) != 0x2c)) {
-				Error("[DISPLAY] Syntax error", line, PASS3);return;
-			}
-			++lp;
-			SkipBlanks(lp);
+			lp += 2;
+			continue;
 		}
-
-		if (*lp == '"') {
-			lp++;
-			do {
-				if (!*lp || *lp == '"') {
-					Error("[DISPLAY] Syntax error", line, PASS3);
-					*ep = 0;
-					return;
-				}
-				if (t == 128) {
-					Error("[DISPLAY] Too many arguments", line, PASS3);
-					*ep = 0;
-					return;
-				}
-				GetCharConstChar(lp, val);
-				check8(val);
-				*(ep++) = (char) (val & 255);
-			} while (*lp != '"');
-			++lp;
-		} else if (*lp == 0x27) {
-		  	lp++;
-			do {
-				if (!*lp || *lp == 0x27) {
-		  			Error("[DISPLAY] Syntax error", line, PASS3);
-					*ep = 0;
-					return;
-				}
-				if (t == LINEMAX - 1) {
-		  			Error("[DISPLAY] Too many arguments", line, PASS3);
-					*ep = 0;
-					return;
-				}
-		  		GetCharConstCharSingle(lp, val);
-				check8(val);
-				*(ep++) = (char) (val & 255);
-			} while (*lp != 0x27);
-		  	++lp;
+		// try to parse some string literal
+		int ei = 0;
+		val = GetCharConstAsString(lp, ep, ei, LINEMAX - (ep-e));
+		if (-1 == val) {
+			Error("[DISPLAY] Syntax error", line);
+			return;
+		} else if (val) {
+			ep += ei;				// string literal successfuly parsed
 		} else {
-		  	displayerror = 0;displayinprocces = 1;
-			if (ParseExpression(lp, val)) {
-				if (displayerror) {
-					displayinprocces = 0;
-					Error("[DISPLAY] Bad argument", line, PASS3);
-					return;
-				} else {
-		  		  	displayinprocces = 0;
-					if (decprint == 0 || decprint == 2) {
-		  		  		*(ep++) = '0';
-						*(ep++) = 'x';
-						if (val < 0x1000) {
-							PrintHEX16(ep, val);
-						} else {
-							PrintHEXAlt(ep, val);
-						}
-					}
-					if (decprint == 2) {
-						*(ep++) = ',';
-						*(ep++) = ' ';
-					}
-					if (decprint == 1 || decprint == 2) {
-						SPRINTF1(ep, (int)(&e[0] + LINEMAX - ep), "%lu", val);
-						ep += strlen(ep);
-					}
-		  		  	decprint = 0;
+			// string literal was not there, how about expression?
+			if (ParseExpressionNoSyntaxError(lp, val)) {
+				val &= 0xFFFFFFFFUL;
+				if (decprint == 'H' || decprint == 'A') {
+					*(ep++) = '0';
+					*(ep++) = 'x';
+					PrintHexAlt(ep, val);
 				}
+				if (decprint == 'D' || decprint == 'A') {
+					if (decprint == 'A') {
+						*(ep++) = ','; *(ep++) = ' ';
+					}
+					ep += SPRINTF1(ep, (int)(&e[0] + LINEMAX - ep), "%lu", val);
+				}
+				decprint = 'H';
 			} else {
-				Error("[DISPLAY] Syntax error", line, PASS3);
+				Error("[DISPLAY] Syntax error", line, SUPPRESS);
 				return;
 			}
 		}
-		SkipBlanks(lp);
-		if (*lp != ',') {
-			break;
-		}
-		++lp;
-	}
+	} while(comma(lp));
 	*ep = 0; // end line
 
-	if (pass != LASTPASS) {
-		// do none
-	} else {
-		_COUT "> " _CMDL e _ENDL;
+	if (LASTPASS == pass && *e) {
+		_CERR "> " _CMDL e _ENDL;
 	}
 }
 
 void dirMACRO() {
-	//if (lijst) Error("No macro definitions allowed here",0,FATAL);
-	if (lijst) {
-		Error("[MACRO] No macro definitions allowed here", 0, FATAL);
-	}
-	char* n;
-	//if (!(n=GetID(lp))) { Error("Illegal macroname",0,PASS1); return; }
-	if (!(n = GetID(lp))) {
-		Error("[MACRO] Illegal macroname", 0); return;
-	}
-	MacroTable.Add(n, lp);
+	if (lijst) Error("[MACRO] No macro definitions allowed here", NULL, FATAL);
+	char* n = GetID(lp);
+	if (n) MacroTable.Add(n, lp);
+	else   Error("[MACRO] Illegal macroname");
 }
 
 void dirENDS() {
-	Error("[ENDS] End structre without structure", 0);
+	Error("[ENDS] End structure without structure");
 }
 
 void dirASSERT() {
@@ -1824,7 +1508,7 @@ void dirASSERT() {
 	/*if (!ParseExpression(lp,val)) { Error("Syntax error",0,CATCHALL); return; }
 	if (pass==2 && !val) Error("Assertion failed",p);*/
 	if (!ParseExpression(lp, val)) {
-		Error("[ASSERT] Syntax error", 0, CATCHALL); return;
+		Error("[ASSERT] Syntax error", NULL, IF_FIRST); return;
 	}
 	if (pass == LASTPASS && !val) {
 		Error("[ASSERT] Assertion failed", p);
@@ -1843,12 +1527,14 @@ void dirSHELLEXEC() {
 		parameters = 0;
 	}
 	if (pass == LASTPASS) {
-		if (parameters) {
-			_COUT "Executing " _CMDL command _CMDL " " _CMDL parameters _ENDL;
-		} else {
-			_COUT "Executing " _CMDL command _ENDL;
+		if (Options::OutputVerbosity <= OV_ALL) {
+			if (parameters) {
+				_CERR "Executing " _CMDL command _CMDL " " _CMDL parameters _ENDL;
+			} else {
+				_CERR "Executing " _CMDL command _ENDL;
+			}
 		}
-#if defined(WIN32) && !defined(UNDER_CE)
+#if defined(WIN32)
 		STARTUPINFO si;
 		PROCESS_INFORMATION pi;
 		ZeroMemory( &si, sizeof(si) );
@@ -1900,27 +1586,9 @@ void dirSHELLEXEC() {
 		//system(command);
 		///WinExec ( command, SW_SHOWNORMAL );
 #else
-#ifdef UNDER_CE
-		SHELLEXECUTEINFO info;
-		info.cbSize = sizeof(SHELLEXECUTEINFO);
-		info.fMask = NULL;
-		info.hwnd = NULL;
-		info.lpVerb = NULL;
-		info.lpFile = _totchar(command);
-		info.lpParameters = NULL;
-		info.lpDirectory = NULL;
-		info.nShow = SW_MAXIMIZE;
-		info.hInstApp = NULL;
-
-		//if (_wsystem(_towchar(command)) == -1) {
-		if (!ShellExecuteEx(&info)) {
-			Error( "[SHELLEXEC] Execution of command failed", command, PASS3 );
-		}
-#else
 		if (system(command) == -1) {
-			Error( "[SHELLEXEC] Execution of command failed", command, PASS3 );
+			Error("[SHELLEXEC] Execution of command failed", command);
 		}
-#endif
 #endif
 	}
 	delete[] command;
@@ -1946,22 +1614,22 @@ void dirSTRUCT() {
 	}
 
 	if (!(naam = GetID(lp)) || !strlen(naam)) {
-		Error("[STRUCT] Illegal structure name", 0); return;
+		Error("[STRUCT] Illegal structure name"); return;
 	}
 	if (comma(lp)) {
 		IsLabelNotFound = 0;
 		if (!ParseExpression(lp, offset)) {
-			Error("[STRUCT] Syntax error", 0, CATCHALL); return;
+			Error("[STRUCT] Syntax error", lp, IF_FIRST); return;
 		}
 		if (IsLabelNotFound) {
-			Error("[STRUCT] Forward reference", 0, ALL);
+			Error("[STRUCT] Forward reference", NULL, ALL);
 		}
 	}
 	st = StructureTable.Add(naam, offset, bind, global);
 	ListFile();
 	while ('o') {
 		if (!ReadLine()) {
-			Error("[STRUCT] Unexpected end of structure", 0); break;
+			Error("[STRUCT] Unexpected end of structure"); break;
 		}
 		lp = line; /*if (White()) { SkipBlanks(lp); if (*lp=='.') ++lp; if (cmphstr(lp,"ends")) break; }*/
 		SkipBlanks(lp);
@@ -1971,7 +1639,7 @@ void dirSTRUCT() {
 			break;
 		 }
 		ParseStructLine(st);
-		ListFileSkip(line);
+		ListFile(true);
 	}
 	st->deflab();
 }
@@ -1984,7 +1652,7 @@ void dirFORG() {
 		method = SEEK_CUR;
 	}
 	if (!ParseExpression(lp, val)) {
-		Error("[FORG] Syntax error", 0, CATCHALL);
+		Error("[FORG] Syntax error", lp, IF_FIRST);
 	}
 	if (pass == LASTPASS) {
 		SeekDest(val, method);
@@ -2004,156 +1672,110 @@ void dirDUP() {
 	if (!RepeatStack.empty()) {
 		SRepeatStack& dup = RepeatStack.top();
 		if (!dup.IsInWork) {
-			if (!ParseExpression(lp, val)) {
-				Error("[DUP/REPT] Syntax error", 0, CATCHALL); return;
-			}
-			dup.Level++;
+			// Just skip the expression to the end of line, don't try to evaluate yet
+			while (*lp) ++lp;
+			++dup.Level;
 			return;
 		}
 	}
 
 	if (!ParseExpression(lp, val)) {
-		Error("[DUP/REPT] Syntax error", 0, CATCHALL); return;
+		Error("[DUP/REPT] Syntax error", lp, IF_FIRST); return;
 	}
 	if (IsLabelNotFound) {
-		Error("[DUP/REPT] Forward reference", 0, ALL);
+		Error("[DUP/REPT] Forward reference", NULL, ALL);
 	}
 	if ((int) val < 1) {
-		Error("[DUP/REPT] Illegal repeat value", 0, CATCHALL); return;
+		Error("[DUP/REPT] Illegal repeat value", NULL, IF_FIRST); return;
 	}
 
 	SRepeatStack dup;
 	dup.RepeatCount = val;
 	dup.Level = 0;
 
-	dup.Lines = new CStringsList(lp, NULL);
+	dup.Lines = new CStringsList(lp);
+	if (!SkipBlanks()) Error("[DUP] unexpected chars", lp, FATAL);	// Ped7g: should have been empty!
 	dup.Pointer = dup.Lines;
-	dup.lp = lp; // EDUP
-	dup.CurrentGlobalLine = CurrentGlobalLine;
-	dup.CurrentLocalLine = CurrentLocalLine;
+	dup.CurrentSourceLine = CurrentSourceLine;
 	dup.IsInWork = false;
 	RepeatStack.push(dup);
 }
 
 void dirEDUP() {
 	if (RepeatStack.empty()) {
-		Error("[EDUP/ENDR] End repeat without repeat", 0);return;
+		Error("[EDUP/ENDR] End repeat without repeat");
+		return;
 	}
 
-	if (!RepeatStack.empty()) {
-		SRepeatStack& dup = RepeatStack.top();
-		if (!dup.IsInWork && dup.Level) {
-			dup.Level--;
-			return;
-		}
-	}
-	int olistmacro;
-	long gcurln, lcurln;
-	char* ml;
 	SRepeatStack& dup = RepeatStack.top();
+	if (!dup.IsInWork && dup.Level) {
+		--dup.Level;
+		return;
+	}
 	dup.IsInWork = true;
-	dup.Pointer->string = new char[LINEMAX];
-	if (dup.Pointer->string == NULL) {
-		Error("[EDUP/ENDR] No enough memory!", 0, FATAL);
-	}
-	*dup.Pointer->string = 0;
-	STRNCAT(dup.Pointer->string, LINEMAX, dup.lp, lp - dup.lp - 4); // EDUP/ENDR/ENDM
-	CStringsList* s;
-	olistmacro = listmacro;
-	listmacro = 1;
-	ml = STRDUP(line);
-	if (ml == NULL) {
-		Error("[EDUP/ENDR] No enough memory", 0, FATAL);
-	}
-	gcurln = CurrentGlobalLine;
-	lcurln = CurrentLocalLine;
+	dup.Pointer->string = NULL;	// kill the EDUP inside DUP-list (also works as "while" terminator)
+	++listmacro;
+	char* ml = STRDUP(line);	// copy the EDUP line for List purposes (after the DUP block emit)
+	if (ml == NULL) Error("[EDUP/ENDR] No enough memory", NULL, FATAL);
+	long lcurln = CurrentSourceLine;
+	CStringsList* olijstp = lijstp;
+	++lijst;
 	while (dup.RepeatCount--) {
-		CurrentGlobalLine = dup.CurrentGlobalLine;
-		CurrentLocalLine = dup.CurrentLocalLine;
-		s = dup.Lines;
-		while (s) {
-			STRCPY(line, LINEMAX, s->string);
-			s = s->next;
+		CurrentSourceLine = dup.CurrentSourceLine;
+		donotlist=1;	// skip first empty line (where DUP itself is parsed)
+		lijstp = dup.Lines;
+		while (IsRunning && lijstp && lijstp->string) {	// the EDUP/REPT/ENDM line has string=NULL => ends loop
+			if (lijstp->sourceLine) CurrentSourceLine = lijstp->sourceLine;
+			STRCPY(line, LINEMAX, lijstp->string);
+			lijstp = lijstp->next;
 			ParseLineSafe();
-			CurrentLocalLine++;
-			CurrentGlobalLine++;
-			CompiledCurrentLine++;
+			++CurrentSourceLine;
 		}
 	}
 	RepeatStack.pop();
-	CurrentGlobalLine = gcurln;
-	CurrentLocalLine = lcurln;
-	listmacro = olistmacro;
-	donotlist = 1;
-	STRCPY(line, LINEMAX,  ml);
-
+	lijstp = olijstp;
+	--lijst;
+	CurrentSourceLine = lcurln;
+	--listmacro;
+	STRCPY(line, LINEMAX,  ml);		// show EDUP line itself
+	free(ml);
+	substitutedLine = line;			// override substituted list line for EDUP
 	ListFile();
 }
 
 void dirENDM() {
 	if (!RepeatStack.empty()) {
+		Warning("ENDM used as DUP/REPT block terminator, this is deprecated (and bugged when used inside macro), change to EDUP or ENDR");
 		dirEDUP();
 	} else {
-		Error("[ENDM] End macro without macro", 0);
+		Error("[ENDM] End macro without macro");
 	}
 }
 
 void dirDEFARRAY() {
-	char* n;
 	char* id;
-	char ml[LINEMAX];
-	CStringsList* a;
-	CStringsList* f;
-
 	if (!(id = GetID(lp))) {
-		Error("[DEFARRAY] Syntax error", 0); return;
+		Error("[DEFARRAY] Syntax error"); return;
 	}
-	SkipBlanks(lp);
-	if (!*lp) {
-		Error("DEFARRAY must have less one entry", 0); return;
+	CStringsList* a = NULL;
+	CStringsList** f = &a;
+	char ml[LINEMAX];
+	while (!SkipBlanks()) {
+		const char* const itemLp = lp;
+		char* n = ml;
+		if (!GetMacroArgumentValue(lp, n)) {
+			Error("[DEFARRAY] Syntax error", itemLp);
+			return;
+		}
+		*f = new CStringsList(ml);
+		if ((*f)->string == NULL) Error("[DEFARRAY] No enough memory", NULL, FATAL);
+		f = &((*f)->next);
+		if (!comma(lp)) break;
 	}
-
-	a = new CStringsList();
-	f = a;
-	while (*lp) {
-		n = ml;
-		SkipBlanks(lp);
-		if (*lp == '<') {
-			++lp;
-			while (*lp != '>') {
-				if (!*lp) {
-					Error("[DEFARRAY] No closing bracket - <..>", 0); return;
-				}
-				if (*lp == '!') {
-					++lp; if (!*lp) {
-						  	Error("[DEFARRAY] No closing bracket - <..>", 0); return;
-						  }
-				}
-				*n = *lp; ++n; ++lp;
-			}
-			++lp;
-		} else {
-			while (*lp && *lp != ',') {
-				*n = *lp; ++n; ++lp;
-			}
-		}
-		*n = 0;
-		//_COUT a->string _ENDL;
-		f->string = STRDUP(ml);
-		if (f->string == NULL) {
-			Error("[DEFARRAY] No enough memory", 0, FATAL);
-		}
-		SkipBlanks(lp);
-		if (*lp == ',') {
-			++lp;
-		} else {
-			break;
-		}
-		f->next = new CStringsList();
-		f = f->next;
+	if (NULL == a) {
+		Error("DEFARRAY must have at least one entry"); return;
 	}
 	DefineTable.Add(id, (char *)"\n", a);
-	//while (a) { STRCPY(ml,a->string); _COUT ml _ENDL; a=a->next; }
 }
 
 #ifdef USE_LUA
@@ -2164,15 +1786,11 @@ void _lua_showerror() {
 	// part from Error(...)
 	char *err = STRDUP(lua_tostring(LUA, -1));
 	if (err == NULL) {
-		Error("No enough memory!", 0, FATAL);
+		Error("No enough memory!", NULL, FATAL);
 	}
-	//_COUT err _ENDL;
 	err += 18;
 	char *pos = strstr(err, ":");
-	//_COUT err _ENDL;
-	//_COUT pos _ENDL;
 	*(pos++) = 0;
-	//_COUT err _ENDL;
 	ln = atoi(err) + LuaLine;
 
 	// print error and other actions
@@ -2183,10 +1801,10 @@ void _lua_showerror() {
 		STRCAT(err, LINEMAX2, "\n");
 	}
 
-	if (FP_ListingFile != NULL) {
-		fputs(ErrorLine, FP_ListingFile);
+	if (GetListingFile()) fputs(ErrorLine, GetListingFile());
+	if (Options::OutputVerbosity <= OV_ERROR) {
+		_CERR ErrorLine _END;
 	}
-	_CERR ErrorLine _END;
 
 	PreviousErrorLine = ln;
 
@@ -2253,18 +1871,17 @@ void dirLUA() {
 		} else if (cmphstr(id, "allpass")) {
 			execute = true;
 		} else {
-			//_COUT id _CMDL "A" _ENDL;
 			Error("[LUA] Syntax error", id);
 		}
 	} else if (pass == LASTPASS) {
 		execute = true;
 	}
 
-	ln = CurrentLocalLine;
+	ln = CurrentSourceLine;
 	ListFile();
 	while (1) {
 		if (!ReadLine(false)) {
-			Error("[LUA] Unexpected end of lua script", 0, PASS3); break;
+			Error("[LUA] Unexpected end of lua script"); break;
 		}
 		lp = line;
 		rp = line;
@@ -2277,7 +1894,7 @@ void dirLUA() {
 					*(bp++) = '\n';
 					*(bp) = 0;
 				} else {
-					Error("[LUA] Maximum size of Lua script is 32768 bytes", 0, FATAL);
+					Error("[LUA] Maximum size of Lua script is 32768 bytes", NULL, FATAL);
 					return;
 				}
 			}
@@ -2291,12 +1908,12 @@ void dirLUA() {
 				*(bp++) = '\n';
 				*(bp) = 0;
 			} else {
-				Error("[LUA] Maximum size of Lua script is 32768 bytes", 0, FATAL);
+				Error("[LUA] Maximum size of Lua script is 32768 bytes", NULL, FATAL);
 				return;
 			}
 		}
 
-		ListFileSkip(line);
+		ListFile(true);
 	}
 
 	if (execute) {
@@ -2313,31 +1930,32 @@ void dirLUA() {
 	}
 
 	delete[] buff;
+	substitutedLine = line;		// override substituted list line for ENDLUA
 }
 
 void dirENDLUA() {
-	Error("[ENDLUA] End of lua script without script", 0);
+	Error("[ENDLUA] End of lua script without script");
 }
 
 void dirINCLUDELUA() {
-	char* fnaam;
-	fnaam = GetFileName(lp);
-
-	if (PASS1 == pass) {
-		EDelimiterType dt = GetDelimiterOfLastFileName();
-		char* fullpath = GetPath(fnaam, NULL, DT_ANGLE == dt);
-		if (!fullpath[0]) {
-			Error("[INCLUDELUA] File doesn't exist", fnaam, PASS1);
-		} else {
-			LuaLine = CurrentLocalLine;
-			int error = luaL_loadfile(LUA, fullpath) || lua_pcall(LUA, 0, 0, 0);
-			if (error) {
-				_lua_showerror();
-			}
-			LuaLine = -1;
-		}
-		free(fullpath);
+	if (1 != pass) {
+		while (*lp) ++lp;	// skip till EOL (colon), to avoid parsing file name
+		return;
 	}
+	char* fnaam = GetFileName(lp);
+	EDelimiterType dt = GetDelimiterOfLastFileName();
+	char* fullpath = GetPath(fnaam, NULL, DT_ANGLE == dt);
+	if (!fullpath[0]) {
+		Error("[INCLUDELUA] File doesn't exist", fnaam, EARLY);
+	} else {
+		LuaLine = CurrentSourceLine;
+		int error = luaL_loadfile(LUA, fullpath) || lua_pcall(LUA, 0, 0, 0);
+		if (error) {
+			_lua_showerror();
+		}
+		LuaLine = -1;
+	}
+	free(fullpath);
 	delete[] fnaam;
 }
 
@@ -2348,10 +1966,10 @@ void dirDEVICE() {
 
 	if ((id = GetID(lp))) {
 		if (!SetDevice(id)) {
-			Error("[DEVICE] Invalid parameter", 0, CATCHALL);
+			Error("[DEVICE] Invalid parameter", NULL, IF_FIRST);
 		}
 	} else {
-		Error("[DEVICE] Syntax error", 0, CATCHALL);
+		Error("[DEVICE] Syntax error", NULL, IF_FIRST);
 	}
 
 
@@ -2367,16 +1985,19 @@ void InsertDirectives() {
 	DirectivesTable.insertd("block", dirBLOCK);
 	DirectivesTable.insertd("dword", dirDWORD);
 	DirectivesTable.insertd("d24", dirD24);
+	DirectivesTable.insertd("dg", dirDG);
+	DirectivesTable.insertd("defg", dirDG);
+	DirectivesTable.insertd("dh", dirDH);
+	DirectivesTable.insertd("defh", dirDH);
+	DirectivesTable.insertd("hex", dirDH);
 	DirectivesTable.insertd("org", dirORG);
 	DirectivesTable.insertd("fpos",dirFORG);
 	DirectivesTable.insertd("map", dirMAP);
 	DirectivesTable.insertd("align", dirALIGN);
 	DirectivesTable.insertd("module", dirMODULE);
-	//DirectivesTable.insertd("z80", dirZ80);
 	DirectivesTable.insertd("size", dirSIZE);
 	//DirectivesTable.insertd("textarea",dirTEXTAREA);
 	DirectivesTable.insertd("textarea", dirDISP);
-	//DirectivesTable.insertd("msx", dirZ80);
 	DirectivesTable.insertd("else", dirELSE);
 	DirectivesTable.insertd("export", dirEXPORT);
 	DirectivesTable.insertd("display", dirDISPLAY);
@@ -2402,6 +2023,8 @@ void InsertDirectives() {
 	DirectivesTable.insertd("ifn", dirIFN);
 	DirectivesTable.insertd("ifused", dirIFUSED);
 	DirectivesTable.insertd("ifnused", dirIFNUSED);
+	DirectivesTable.insertd("ifdef", dirIFDEF);
+	DirectivesTable.insertd("ifndef", dirIFNDEF);
 	DirectivesTable.insertd("output", dirOUTPUT);
 	DirectivesTable.insertd("outend", dirOUTEND);
 	DirectivesTable.insertd("tapout", dirTAPOUT);
@@ -2409,8 +2032,6 @@ void InsertDirectives() {
 	DirectivesTable.insertd("define", dirDEFINE);
 	DirectivesTable.insertd("undefine", dirUNDEFINE);
 	DirectivesTable.insertd("defarray", dirDEFARRAY);
-	DirectivesTable.insertd("ifdef", dirIFDEF);
-	DirectivesTable.insertd("ifndef", dirIFNDEF);
 	DirectivesTable.insertd("macro", dirMACRO);
 	DirectivesTable.insertd("struct", dirSTRUCT);
 	DirectivesTable.insertd("dc", dirDC);
@@ -2468,10 +2089,10 @@ void InsertDirectives() {
 bool LuaSetPage(aint n) {
 	if (n < 0) {
 		Error("sj.set_page: negative page number are not allowed", lp); return false;
-	} else if (n > Device->PagesCount - 1) {
+	} else if (Device->PagesCount <= n) {
 		char buf[LINEMAX];
-		SPRINTF1(buf, LINEMAX, "sj.set_page: page number must be in range 0..%lu", Device->PagesCount - 1);
-		Error(buf, 0, CATCHALL); return false;
+		SPRINTF1(buf, LINEMAX, "sj.set_page: page number must be in range 0..%u", Device->PagesCount - 1);
+		Error(buf, NULL, IF_FIRST); return false;
 	}
 	Slot->Page = Device->GetPage(n);
 	CheckPage();
@@ -2481,10 +2102,10 @@ bool LuaSetPage(aint n) {
 bool LuaSetSlot(aint n) {
 	if (n < 0) {
 		Error("sj.set_slot: negative slot number are not allowed", lp); return false;
-	} else if (n > Device->SlotsCount - 1) {
+	} else if (Device->SlotsCount <= n) {
 		char buf[LINEMAX];
-		SPRINTF1(buf, LINEMAX, "sj.set_slot: slot number must be in range 0..%lu", Device->SlotsCount - 1);
-		Error(buf, 0, CATCHALL); return false;
+		SPRINTF1(buf, LINEMAX, "sj.set_slot: slot number must be in range 0..%u", Device->SlotsCount - 1);
+		Error(buf, NULL, IF_FIRST); return false;
 	}
 	Slot = Device->GetSlot(n);
 	Device->CurrentSlot = Slot->Number;

@@ -4,7 +4,7 @@
 #
 ##############################################################
 
-cmake_minimum_required(VERSION 3.1.0)
+cmake_minimum_required(VERSION 3.9.6)
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules ${CMAKE_MODULE_PATH})
 
 project(sjasmplus)
@@ -31,8 +31,12 @@ set(SOURCES
 add_definitions(-DMAX_PATH=PATH_MAX)
 add_definitions(-DCMAKE)
 
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Wall -Wabi -pedantic")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -Wabi -pedantic")
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
+
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Wall -pedantic")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wall -pedantic")
 
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -s")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -s")
@@ -118,3 +122,15 @@ endif()
 
 install(TARGETS ${PROJECT_NAME}
 	RUNTIME DESTINATION bin)
+
+find_program(BASH_PROGRAM bash)
+
+if(BASH_PROGRAM)
+	add_custom_target(tests COMMAND "EXE=${CMAKE_BINARY_DIR}/${PROJECT_NAME}" ${BASH_PROGRAM} "${CMAKE_SOURCE_DIR}/ContinuousIntegration/test_folder_tests.sh"
+		WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+		DEPENDS ${PROJECT_NAME})
+
+	add_custom_target(examples COMMAND "EXE=${CMAKE_BINARY_DIR}/${PROJECT_NAME}" ${BASH_PROGRAM} "${CMAKE_SOURCE_DIR}/ContinuousIntegration/test_folder_examples.sh"
+		WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+		DEPENDS ${PROJECT_NAME})
+endif()

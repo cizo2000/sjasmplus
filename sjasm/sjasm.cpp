@@ -37,6 +37,8 @@
 #endif //USE_LUA
 
 void PrintHelp() {
+	// Please keep help lines at most 79 characters long (cursor at column 88 after last char)
+	//     |<-- ...8901234567890123456789012345678901234567890123456789012... 80 chars -->|
 	_COUT "Based on code of SjASM by Sjoerd Mastijn (http://www.xl2s.tk)" _ENDL;
 	_COUT "Copyright 2004-2019 by Aprisobal and all other participants" _ENDL;
 	//_COUT "Patches by Antipod / boo_boo / PulkoMandy and others" _ENDL;
@@ -47,21 +49,23 @@ void PrintHelp() {
 	_COUT "  --zxnext                 Enable SpecNext Z80 extensions" _ENDL;
 	_COUT "  -i<path> or -I<path> or --inc=<path>" _ENDL;
 	_COUT "                           Include path (later defined have higher priority)" _ENDL;
-	_COUT "  --lst=<filename>         Save listing to <filename>" _ENDL;
+	_COUT "  --lst[=<filename>]       Save listing to <filename> (<source>.lst is default)" _ENDL;
 	_COUT "  --lstlab                 Enable label table in listing" _ENDL;
 	_COUT "  --sym=<filename>         Save symbols list to <filename>" _ENDL;
 	_COUT "  --exp=<filename>         Save exports to <filename> (see EXPORT pseudo-op)" _ENDL;
 	//_COUT "  --autoreloc              Switch to autorelocation mode. See more in docs." _ENDL;
-	_COUT "  --raw=<filename>         Save all output to <filename> ignoring OUTPUT pseudo-ops" _ENDL;
+	_COUT "  --raw=<filename>         Machine code saved also to <filename> (- is STDOUT)" _ENDL;
 	_COUT " Note: use OUTPUT, LUA/ENDLUA and other pseudo-ops to control output" _ENDL;
 	_COUT " Logging:" _ENDL;
 	_COUT "  --nologo                 Do not show startup message" _ENDL;
-	_COUT "  --msg=[all|war|err]      Stderr messages verbosity (\"all\" is default)" _ENDL;
+	_COUT "  --msg=[all|war|err|none|lst|lstlab]" _ENDL;
+	_COUT "                           Stderr messages verbosity (\"all\" is default)" _ENDL;
 	_COUT "  --fullpath               Show full path to error file" _ENDL;
 	_COUT " Other:" _ENDL;
 	_COUT "  -D<NAME>[=<value>]       Define <NAME> as <value>" _ENDL;
+	_COUT "  -                        Reads STDIN as source (no other sourcefile allowed)" _ENDL;
 	_COUT "  --reversepop             Enable reverse POP order (as in base SjASM version)" _ENDL;
-	_COUT "  --dirbol                 Enable processing directives from the beginning of line" _ENDL;
+	_COUT "  --dirbol                 Enable directives from the beginning of line" _ENDL;
 	_COUT "  --nofakes                Disable fake instructions" _ENDL;
 	_COUT "  --dos866                 Encode from Windows codepage to DOS 866 (Cyrillic)" _ENDL;
 }
@@ -70,7 +74,7 @@ namespace Options {
 	char SymbolListFName[LINEMAX] = {0};
 	char ListingFName[LINEMAX] = {0};
 	char ExportFName[LINEMAX] = {0};
-	char DestionationFName[LINEMAX] = {0};
+	char DestinationFName[LINEMAX] = {0};
 	char RAWFName[LINEMAX] = {0};
 	char UnrealLabelListFName[LINEMAX] = {0};
 
@@ -81,17 +85,19 @@ namespace Options {
 	bool IsPseudoOpBOF = 0;
 	bool IsAutoReloc = 0;
 	bool IsLabelTableInListing = 0;
+	bool IsDefaultListingName = false;
 	bool IsReversePOP = 0;
 	bool IsShowFullPath = 0;
-	bool AddLabelListing = 0;
+	bool AddLabelListing = false;
 	bool HideLogo = 0;
 	bool ShowHelp = 0;
 	bool NoDestinationFile = true;		// no *.out file by default
 	bool FakeInstructions = 1;
 	bool IsNextEnabled = false;
+	bool SourceStdIn = false;
 
 	// Include directories list is initialized with "." directory
-	CStringsList* IncludeDirsList = new CStringsList((char *)".", NULL);
+	CStringsList* IncludeDirsList = new CStringsList((char *)".");
 	CDefineTable CmdDefineTable;		// is initialized by constructor
 
 } // eof namespace Options
@@ -104,32 +110,29 @@ CDevicePage *Page = 0;
 char* DeviceID = 0;
 
 // extend
-char filename[LINEMAX], * lp, line[LINEMAX], temp[LINEMAX], * tp, pline[LINEMAX2], ErrorLine[LINEMAX2], * bp;
-char mline[LINEMAX2], sline[LINEMAX2], sline2[LINEMAX2];
+char filename[LINEMAX], * lp, line[LINEMAX], temp[LINEMAX], ErrorLine[LINEMAX2], * bp;
+char sline[LINEMAX2], sline2[LINEMAX2], * substitutedLine, * eolComment;
 
 char SourceFNames[128][MAX_PATH];
-int CurrentSourceFName = 0;
-int SourceFNamesCount = 0;
+static int SourceFNamesCount = 0;
+std::vector<char> stdin_log;
 
-bool displayerror,displayinprocces = 0;
 int ConvertEncoding = ENCWIN;
 
 int pass = 0, IsLabelNotFound = 0, ErrorCount = 0, WarningCount = 0, IncludeLevel = -1;
-int IsRunning = 0, IsListingFileOpened = 1, donotlist = 0,listdata  = 0,listmacro  = 0;
+int IsRunning = 0, donotlist = 0, listmacro = 0;
 int adrdisp = 0,PseudoORG = 0;
 char* MemoryRAM=NULL, * MemoryPointer=NULL;
 int MemoryCPage = 0, MemoryPagesCount = 0, StartAddress = -1;
 aint MemorySize = 0;
-int macronummer = 0, lijst = 0, reglenwidth = 0, synerr = 1;
-aint CurAddress = 0, AddressOfMAP = 0, CurrentGlobalLine = 0, CurrentLocalLine = 0, CompiledCurrentLine = 0;
-aint destlen = 0, size = (aint)-1,PreviousErrorLine = (aint)-1, maxlin = 0, comlin = 0;
+int macronummer = 0, lijst = 0, reglenwidth = 0;
+aint CurAddress = 0, AddressOfMAP = 0, CurrentSourceLine = 0, CompiledCurrentLine = 0;
+aint destlen = 0, size = -1L,PreviousErrorLine = -1L, maxlin = 0, comlin = 0;
 char* CurrentDirectory=NULL;
-
-void (*GetCPUInstruction)(void);
 
 char* ModuleName=NULL, * vorlabp=NULL, * macrolabp=NULL, * LastParsedLabel=NULL;
 stack<SRepeatStack> RepeatStack;
-CStringsList* lijstp = 0;
+CStringsList* lijstp = NULL;
 CLabelTable LabelTable;
 CLocalLabelTable LocalLabelTable;
 CDefineTable DefineTable;
@@ -146,26 +149,14 @@ int LuaLine=-1;
 
 #endif //USE_LUA
 
-void InitPass(int p) {
-	reglenwidth = 1;
-	if (maxlin > 9) {
-		reglenwidth = 2;
-	}
-	if (maxlin > 99) {
-		reglenwidth = 3;
-	}
-	if (maxlin > 999) {
-		reglenwidth = 4;
-	}
-	if (maxlin > 9999) {
-		reglenwidth = 5;
-	}
-	if (maxlin > 99999) {
-		reglenwidth = 6;
-	}
-	if (maxlin > 999999) {
-		reglenwidth = 7;
-	}
+void InitPass() {
+	aint pow10 = 1;
+	reglenwidth = 0;
+	do {
+		++reglenwidth;
+		pow10 *= 10;
+		if (pow10 < 10) ExitASM(1);	// 32b overflow
+	} while (pow10 <= maxlin);
 	if (ModuleName != NULL) {
 		free(ModuleName);
 		ModuleName = NULL;
@@ -180,17 +171,17 @@ void InitPass(int p) {
 	STRCPY(vorlabp, sizeof("_"), "_");
 	macrolabp = NULL;
 	listmacro = 0;
-	pass = p;
 	CurAddress = AddressOfMAP = 0;
-	IsRunning = 1;
-	CurrentGlobalLine = CurrentLocalLine = CompiledCurrentLine = 0;
+	CurrentSourceLine = CompiledCurrentLine = 0;
 	PseudoORG = 0; adrdisp = 0;
 	PreviousAddress = 0; epadres = 0; macronummer = 0; lijst = 0; comlin = 0;
+	lijstp = NULL;
 	ModuleList = NULL;
 	StructureTable.Init();
 	MacroTable.Init();
 	DefineTable = Options::CmdDefineTable;
 	MacroDefineTable.Init();
+	LocalLabelTable.InitPass();
 
 	// predefined
 	DefineTable.Replace("_SJASMPLUS", "1");
@@ -282,17 +273,28 @@ namespace Options {
 				if (!strcmp(opt,"h") || !strcmp(opt, "help")) {
 					ShowHelp = 1;
 				} else if (!strcmp(opt, "lstlab")) {
-					AddLabelListing = 1;
+					AddLabelListing = true;
 				} else if (CheckAssignmentOption("msg", NULL, 0)) {
-					if (!strcmp("err", val)) {
+					if (!strcmp("none", val)) {
+						OutputVerbosity = OV_NONE;
+						HideLogo = true;
+					} else if (!strcmp("err", val)) {
 						OutputVerbosity = OV_ERROR;
 					} else if (!strcmp("war", val)) {
 						OutputVerbosity = OV_WARNING;
 					} else if (!strcmp("all", val)) {
 						OutputVerbosity = OV_ALL;
+					} else if (!strcmp("lst", val)) {
+						OutputVerbosity = OV_LST;
+						AddLabelListing = false;
+					} else if (!strcmp("lstlab", val)) {
+						OutputVerbosity = OV_LST;
+						AddLabelListing = true;
 					} else {
 						_CERR "Unexpected parameter in " _CMDL arg _ENDL;
 					}
+				} else if (!strcmp(opt, "lst") && !val[0]) {
+					IsDefaultListingName = true;
 				} else if (
 					CheckAssignmentOption("sym", SymbolListFName, LINEMAX) ||
 					CheckAssignmentOption("lst", ListingFName, LINEMAX) ||
@@ -328,6 +330,9 @@ namespace Options {
 					} else {
 						_CERR "No parameters found in " _CMDL arg _ENDL;
 					}
+				} else if (0 == opt[0]) {
+					SourceStdIn = true;		// only single "-" was on command line = source STDIN
+					stdin_log.reserve(100000);	// reserve 100k bytes for a start
 				} else {
 					_CERR "Unrecognized option: " _CMDL opt _ENDL;
 				}
@@ -339,7 +344,7 @@ namespace Options {
 #ifdef USE_LUA
 
 void LuaFatalError(lua_State *L) {
-	Error((char *)lua_tostring(L, -1), 0, FATAL);
+	Error((char *)lua_tostring(L, -1), NULL, FATAL);
 }
 
 #endif //USE_LUA
@@ -367,8 +372,14 @@ int main(int argc, char **argv) {
 		Options::COptionsParser optParser;
 		while (argv[i]) {
 			optParser.GetOptions(argv, i);
-			if (!argv[i]) break;
-			STRCPY(SourceFNames[SourceFNamesCount++], LINEMAX, argv[i++]);
+			if (!argv[i] || 128 <= SourceFNamesCount) break;
+			STRCPY(SourceFNames[SourceFNamesCount++], MAX_PATH-32, argv[i++]);
+		}
+		if (Options::IsDefaultListingName && Options::ListingFName[0]) {
+			Error("Using both  --lst  and  --lst=<filename>  is not possible.", NULL, FATAL);
+		}
+		if (OV_LST == Options::OutputVerbosity && (Options::IsDefaultListingName || Options::ListingFName[0])) {
+			Error("Using  --msg=lst[lab]  and other list options is not possible.", NULL, FATAL);
 		}
 	}
 
@@ -379,7 +390,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (!Options::HideLogo) {
-		_COUT logo _ENDL;
+		_CERR logo _ENDL;
 	}
 
 #ifdef USE_LUA
@@ -394,53 +405,55 @@ int main(int argc, char **argv) {
 
 #endif //USE_LUA
 
-	if (!SourceFNames[0][0]) {
-		_CERR "No inputfile(s)" _ENDL;
+	// exit with error if no input file were specified
+	if (!SourceFNames[0][0] && !Options::SourceStdIn) {
+		if (Options::OutputVerbosity <= OV_ERROR) {
+			_CERR "No inputfile(s)" _ENDL;
+		}
 		exit(1);
 	}
+	// verify for STDIN input there is no other file specified + create empty name signaling STDIN
+	if (Options::SourceStdIn) {
+		if (0 < SourceFNamesCount) {	// list of explicit input files must be empty with `-` option
+			if (Options::OutputVerbosity <= OV_ERROR) {
+				_CERR "Don't add input file when STDIN option is specified." _ENDL;
+			}
+			exit(1);
+		}
+		// stdin itself has empty filename
+		SourceFNames[SourceFNamesCount++][0] = 0;
+		// but fake output name if not selected explicitly
+		if (!Options::DestinationFName[0]) STRCPY(Options::DestinationFName, LINEMAX, "asm.out");
+	}
 
-	if (!Options::DestionationFName[0]) {
-		STRCPY(Options::DestionationFName, LINEMAX, SourceFNames[0]);
-		if (!(p = strchr(Options::DestionationFName, '.'))) {
-			p = Options::DestionationFName;
+	// create default output name, if not specified
+	if (!Options::DestinationFName[0]) {
+		STRCPY(Options::DestinationFName, LINEMAX, SourceFNames[0]);
+		if (!(p = strchr(Options::DestinationFName, '.'))) {
+			p = Options::DestinationFName;
 		} else {
 			*p = 0;
 		}
-		STRCAT(p, LINEMAX-(p-Options::DestionationFName), ".out");
+		STRCAT(p, LINEMAX-(p-Options::DestinationFName), ".out");
 	}
+
+	base_encoding = ConvertEncoding;
 
 	// init some vars
 	InitCPU();
 
-	// if memory type != none
-	base_encoding = ConvertEncoding;
-
-	// init first pass
-	InitPass(1);
-
-	// open lists
+	// open lists (if not set to "default" file name, then the OpenFile will handle it)
 	OpenList();
 
-	// open source filenames
-	for (i = 0; i < SourceFNamesCount; i++) {
-		OpenFile(SourceFNames[i]);
-	}
-
-	if (Options::OutputVerbosity <= OV_ALL) {
-		_CERR "Pass 1 complete (" _CMDL ErrorCount _CMDL " errors)" _ENDL;
-	}
-
-	ConvertEncoding = base_encoding;
-
 	do {
-		pass++;
+		++pass;
+		InitPass();
 
-		InitPass(pass);
+		if (pass == LASTPASS) OpenDest();
 
-		if (pass == LASTPASS) {
-			OpenDest();
-		}
 		for (i = 0; i < SourceFNamesCount; i++) {
+			IsRunning = 1;
+			ConvertEncoding = base_encoding;
 			OpenFile(SourceFNames[i]);
 		}
 
@@ -455,12 +468,12 @@ int main(int argc, char **argv) {
 				_CERR "Pass 3 complete" _ENDL;
 			}
 		}
-	} while (pass < 3);//MAXPASSES);
+	} while (pass < LASTPASS);
 
 	pass = 9999; /* added for detect end of compiling */
-	if (Options::AddLabelListing) {
-		LabelTable.Dump();
-	}
+
+	// dump label table into listing file, the explicit one (Options::IsDefaultListingName == false)
+	if (Options::AddLabelListing) LabelTable.Dump();
 
 	Close();
 

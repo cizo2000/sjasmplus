@@ -28,7 +28,17 @@
 
 // sjio.h
 
-enum EStatus { ALL, PASS1, PASS2, PASS3, FATAL, CATCHALL, SUPPRESS };
+/**
+ * Error types:
+ * ALL = will try to display in every pass
+ * FATAL = terminates assembler
+ * EARLY = displays only during early phase (pass 1+2)
+ * PASS3 = normal error message level for code-gen pass (pass 3)
+ * IF_FIRST = normal code-gen error, but will display only if it is first error on the current line
+ * SUPPRESS = will suppress further errors (PASS3+IF_FIRST+ALL) for current line, except FATAL
+ * */
+enum EStatus { ALL, FATAL, EARLY, PASS3, IF_FIRST, SUPPRESS };
+enum EWStatus { W_ALL, W_EARLY, W_PASS3 };
 enum EReturn { END, ELSE, ENDIF, ENDTEXTAREA, ENDM };
 
 #ifdef PAGESIZE
@@ -45,32 +55,32 @@ extern aint PreviousAddress, epadres;
 
 extern FILE* FP_UnrealList, * FP_Input;
 
-void OpenDest(int);
-void NewDest(char* newfilename, int mode);
+void OpenDest(int mode = OUTPUT_TRUNCATE);
+void NewDest(char* newfilename, int mode = OUTPUT_TRUNCATE);
 int FileExists(char* filename);
-void Error(const char*, const char*, int = LASTPASS);
-void Warning(const char*, const char*, int = LASTPASS);
-void ListFile();
-void ListFileSkip(char*);
+void Error(const char* message, const char* badValueMessage = NULL, EStatus type = PASS3);
+void ErrorInt(const char* message, aint badValue, EStatus type = PASS3);
+void Warning(const char* message, const char* badValueMessage = NULL, EWStatus type = W_PASS3);
+FILE* GetListingFile();
+void ListFile(bool showAsSkipped = false);
 void CheckPage();
 void EmitByte(int byte);
 void EmitWord(int word);
 void EmitBytes(int* bytes);
 void EmitWords(int* words);
-void EmitBlock(aint byte, aint len, bool nulled = false);
+void EmitBlock(aint byte, aint len, bool preserveDeviceMemory = false, int emitMaxToListing = 4);
 void OpenFile(char* nfilename, bool systemPathsBeforeCurrent = false);
 void IncludeFile(char* nfilename, bool systemPathsBeforeCurrent);
 void Close();
 void OpenList();
 void OpenUnrealList();
 void ReadBufLine(bool Parse = true, bool SplitByColon = true);
-void OpenDest();
 void CloseDest();
 void CloseTapFile();
 void OpenTapFile(char * tapename, int flagbyte);
-void PrintHEX32(char*& p, aint h);
-void PrintHEX16(char*& p, aint h);
-void PrintHEXAlt(char*& p, aint h);
+void PrintHex(char* & dest, aint value, int nibbles);
+void PrintHex32(char* & dest, aint value);
+void PrintHexAlt(char* & dest, aint value);
 char* GetPath(char* fname, char** filenamebegin = NULL, bool systemPathsBeforeCurrent = false);
 void BinIncFile(char* fname, int offset, int length);
 int SaveRAM(FILE*, int, int);
@@ -80,10 +90,7 @@ int SaveBinary(char* fname, int start, int length);
 int SaveHobeta(char* fname, char* fhobname, int start, int length);
 int ReadLine(bool SplitByColon = true);
 EReturn ReadFile();
-EReturn ReadFile(const char* pp, const char* err);
 EReturn SkipFile();
-EReturn SkipFile(char* pp, const char* err);
-void NewDest(char* newfilename);
 void SeekDest(long, int);
 int ReadFileToCStringsList(CStringsList*& f, const char* end);
 void WriteExp(char* n, aint v);
