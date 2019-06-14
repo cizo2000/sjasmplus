@@ -30,7 +30,7 @@
 #define __SJDEFS
 
 // version string
-#define VERSION "1.11.0"
+#define VERSION "1.13.1"
 
 #define LASTPASS 3
 
@@ -43,9 +43,11 @@
 
 // standard libraries
 #ifdef WIN32
+#define NOMINMAX
 #include <windows.h>
 #endif
 
+#include <algorithm>
 #include <stack>
 #include <vector>
 #include <iostream>
@@ -53,7 +55,6 @@ using std::cout;
 using std::cerr;
 using std::endl;
 using std::flush;
-using std::stack;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,7 +84,8 @@ extern "C" {
 #define LABTABSIZE 32768
 #define FUNTABSIZE 4096
 #endif
-#define aint long
+typedef long aint;
+typedef uint8_t byte;
 
 #ifndef PATH_MAX
 #define PATH_MAX	4096
@@ -104,6 +106,7 @@ extern "C" {
 #include "io_snapshots.h"
 #include "io_trd.h"
 #include "io_tape.h"
+#include "io_nex.h"
 #include "sjasm.h"
 
 #endif

@@ -41,15 +41,21 @@ int SkipBlanks();
 void SkipToEol(char*& p);
 int NeedEQU();
 int NeedDEFL();
-int NeedField();
+bool NeedIoC();
+bool isMacroNext();				// checks if ".macro" directive is ahead (but doesn't consume it)
 char* GetID(char*& p);
+void ResetGrowSubId();
+char* GrowSubId(char* & p);
+char* GrowSubIdByExtraChar(char* & p);	// force grow even by non-label char
 char* getinstr(char*& p);
-int comma(char*& p);
+bool anyComma(char*& p);		// eats any comma (even one of double-commas)
+bool comma(char*& p);			// eats single comma, but not if double-comma is ahead
+bool doubleComma(char* & p);
+bool doubleBacktick(char* & p);
+bool nonMaComma(char* & p);		// eats single comma only if multi-arg is configured to non-comma
 EBracketType OpenBracket(char*& p);
 int CloseBracket(char*& p);
-int oparenOLD(char*& p, char c);
-int cparenOLD(char*& p);
-char* getparen(char* p);
+char* ParenthesesEnd(char* p);
 int check8(aint val, bool error=true);
 int check8o(long val);
 int check16(aint val, bool error=true);
@@ -68,7 +74,7 @@ template <class strT> int GetCharConstAsString(char* & p, strT e[], int & ei, in
 int GetBytes(char*& p, int e[], int add, int dc);
 int GetBits(char*& p, int e[]);
 int GetBytesHexaText(char*& p, int e[]);
-int cmphstr(char*& p1, const char* p2);
+int cmphstr(char*& p1, const char* p2);		// p2 must be lowercase to match both cases
 char* GetFileName(char*& p, bool convertslashes=false);
 EDelimiterType GetDelimiterOfLastFileName();	// DT_NONE if no GetFileName was called
 int islabchar(char p);

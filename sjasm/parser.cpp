@@ -46,21 +46,23 @@ int ParseExpPrim(char*& p, aint& nval) {
 				Error("')' expected");
 				return 0;
 		 }
-	} else if (DeviceID && *p == '{') {
-	  	++p; res = ParseExpression(p, nval);
-		/*if (nval < 0x4000) {
-			Error("Address in {..} must be more than 4000h"); return 0;
-		} */
-		if (nval > 0xFFFE) {
-			Error("Address in {..} must be less than FFFEh"); return 0;
-		}
+	} else if (DeviceID && *p == '{') {		// read WORD/BYTE from virtual device memory
+		char* const readMemP = p;
+		const int byteOnly = cmphstr(++p, "b");
+		ParseExpression(p, nval);
 		if (!need(p, '}')) {
-			Error("'}' expected"); return 0;
+			Error("'}' expected", readMemP, SUPPRESS);
+			return 0;
 		}
-
-	  	nval = (aint) (MemGetByte(nval) + (MemGetByte(nval + 1) << 8));
-
-	  	return 1;
+		if (nval < 0 || (0xFFFE + byteOnly) < nval) {
+			Error("Address in {..} must fetch bytes from 0x0000..0xFFFF range", readMemP);
+			nval = 0;
+			return 1;						// and return zero value as result (avoid "syntax error")
+		}
+		res = int(MemGetByte(nval));
+		if (!byteOnly) res += int(MemGetByte(nval + 1)) << 8;
+		nval = res;
+		return 1;
 	} else if (isdigit((unsigned char) * p) || (*p == '#' && isalnum((unsigned char) * (p + 1))) || (*p == '$' && isalnum((unsigned char) * (p + 1))) || *p == '%') {
 	  	res = GetConstant(p, nval);
 	} else if (isalpha((unsigned char) * p) || *p == '_' || *p == '.' || *p == '@') {
@@ -390,8 +392,12 @@ void ParseAlignArguments(char* & src, aint & alignment, aint & fill) {
 static bool ReplaceDefineInternal(char* lp, char* const nl) {
 	int definegereplaced = 0,dr;
 	char* rp = nl,* nid,* kp,* ver;
+	bool isPrevDefDir, isCurrDefDir = false;	// to remember if one of DEFINE-related directives was previous word
+	bool afterNonAlphaNum, afterNonAlphaNumNext = true;
 	while (*lp) {
 		const char c1 = lp[0], c2 = lp[1];
+		afterNonAlphaNum = afterNonAlphaNumNext;
+		afterNonAlphaNumNext = !isalnum(c1);
 		if (c1 == '/' && c2 == '*') {	// block-comment local beginning (++block_nesting)
 			lp += 2;
 			++comlin;
@@ -413,23 +419,22 @@ static bool ReplaceDefineInternal(char* lp, char* const nl) {
 		// for following code (0 == comlin) (unless it has its own parse loop)
 
 		// single line comments -> finish
-		if (c1 == ';' || (c1 == '/' && c2 == '/')) break;
-
-		// detect "af'" register, as that hurts string parsing
-		if (cmphstr(lp, "af'")) {		// convert it into plain "AF" (it's enough)
-			*rp++ = 'a';
-			*rp++ = 'f';
-			continue;
+		if (c1 == ';' || (c1 == '/' && c2 == '/')) {
+			// set empty eol line comment, if the source of data is still the original "line" buffer
+			if (!eolComment && line <= lp && lp < line+LINEMAX) eolComment = lp;
+			break;
 		}
 
 		// strings parsing
-		if (c1 == '"' || c1 == '\'') {
+		if (afterNonAlphaNum && (c1 == '"' || c1 == '\'')) {
+			isPrevDefDir = isCurrDefDir;
+			isCurrDefDir = false;
 			*rp++ = *lp++;				// copy the string delimiter (" or ')
 			// apostrophe inside apostrophes ('') will parse as end + start of another string
 			// which sort of "accidentally" leads to correct final results
 			while (*lp && c1 != *lp) {	// until end of current string is reached (or line ends)
 				// inside double quotes the backslash should escape (anything after it)
-				if ('"' == c1 && '\\' == *lp) *rp++ = *lp++;	// copy escaping backslash extra
+				if ('"' == c1 && '\\' == *lp && lp[1]) *rp++ = *lp++;	// copy escaping backslash extra
 				*rp++ = *lp++;			// copy string character
 			}
 			if (*lp) *rp++ = *lp++;		// copy the ending string delimiter (" or ')
@@ -441,62 +446,72 @@ static bool ReplaceDefineInternal(char* lp, char* const nl) {
 			continue;
 		}
 
-		nid = GetID(lp); dr = 1;
+		// update previous/current word is define-related directive
+		isPrevDefDir = isCurrDefDir;
+		kp = lp;
+		isCurrDefDir = afterNonAlphaNum && (cmphstr(kp, "define") || cmphstr(kp, "undefine") || cmphstr(kp, "defarray+")
+			|| cmphstr(kp, "defarray") || cmphstr(kp, "ifdef") || cmphstr(kp, "ifndef"));
 
-		if (!(ver = DefineTable.Get(nid))) {
-			if (!macrolabp || !(ver = MacroDefineTable.getverv(nid))) {
-				dr = 0;
+		// The following loop is recursive-like macro/define substitution, the `*lp` here points
+		// at alphabet/underscore char, marking start of "id" string, and it will be parsed by
+		// sub-id parts, delimited by underscores, each combination of consecutive sub-ids may
+		// be substituted by some macro argument or define.
+
+		//TODO - maybe consider the substitution search to go downward, from longest term to shortest subterm
+		ResetGrowSubId();
+		char* nextSubIdLp = lp, * wholeIdLp = lp;
+		do { //while(islabchar(*lp));
+			nid = GrowSubId(lp);		// grow the current sub-id part by part, checking each combination for substitution
+			// defines/macro arguments can substitute in the middle of ID only if they don't start with underscore
+			const bool canSubstituteInside = '_' != nid[0] || nextSubIdLp == wholeIdLp;
+			if (macrolabp && canSubstituteInside && (ver = MacroDefineTable.getverv(nid))) {
+				dr = 2;			// macro argument substitution is possible
+			} else if (!isPrevDefDir && canSubstituteInside && (ver = DefineTable.Get(nid))) {
+				dr = 1;			// DEFINE substitution is possible
+				//handle DEFARRAY case
+				if (DefineTable.DefArrayList) {
+					ver = nid;	// in case of some error, just copy the array id "as is"
+					CStringsList* a = DefineTable.DefArrayList;
+					while (White(*lp)) GrowSubIdByExtraChar(lp);
+					aint val;
+					if ('[' != *lp) Error("[ARRAY] Expression error", nextSubIdLp, SUPPRESS);
+					if ('[' == *lp && GrowSubIdByExtraChar(lp) && ParseExpressionNoSyntaxError(lp, val) && ']' == *lp) {
+						++lp;
+						while (0 < val && a) {
+							a = a->next;
+							--val;
+						}
+						if (val < 0 || NULL == a) {
+							*ver = 0;			// substitute with empty string
+							Error("[ARRAY] index not in 0..<Size-1> range", nextSubIdLp, SUPPRESS);
+						} else {
+							ver = a->string;	// substitute with array value
+						}
+					} else {	// no substition of array possible at this time (index eval / syntax error)
+						dr = -1;// write into output, but don't count as replacement
+					}
+				}
+			} else {
+				dr = 0;			// no possible substitution found
 				ver = nid;
 			}
-		}
-
-		if (DefineTable.DefArrayList) {
-			CStringsList* a = DefineTable.DefArrayList;
-			aint val;
-			while (White(*lp) || '[' == *lp) ++lp;
-			if (!ParseExpression(lp, val)) {
-				Error("[ARRAY] Expression error", lp, IF_FIRST);break;
+			// check if no substition was found, and there's no more chars to extend SubId
+			if (0 == dr && !islabchar(*lp)) {
+				lp = nextSubIdLp;		// was fully extended, no match, "eat" first subId
+				ResetGrowSubId();
+				ver = GrowSubId(lp);	// find the first SubId again, for the copy
+				dr = -1;				// write into output, but don't count as replacement
 			}
-			while (*lp == ']' && *(lp++));
-			if (val < 0) {
-				Error("Number of cell must be positive", NULL, IF_FIRST);break;
+			if (0 < dr) definegereplaced = 1;		// above zero => count as replacement
+			if (0 != dr) {				// any non-zero dr => write to the output
+				while (*ver) *rp++ = *ver++;		// replace the string into target buffer
+				// reset subId parser to catch second+ subId in current Id
+				ResetGrowSubId();
+				nextSubIdLp = lp;
 			}
-			val++;
-			while (a && val) {
-				STRCPY(ver, LINEMAX, a->string); // very danger!
-				a = a->next;
-				val--;
-			}
-			if (val && !a) {
-				Error("Cell of array not found", NULL, IF_FIRST);break;
-			}
-		}
-
-		if (dr) {
-			kp = lp - strlen(nid);
-			while (White(*--kp)) ;		// return back (once) even from \0
-			kp = kp - 4;
-			if (cmphstr(kp, "ifdef")) {
-				dr = 0; ver = nid;
-			} else {
-				--kp;
-				if (cmphstr(kp, "ifndef")) {
-					dr = 0; ver = nid;
-				} else if (cmphstr(kp, "define")) {
-					dr = 0; ver = nid;
-				} else if (cmphstr(kp, "defarray")) {
-					dr = 0; ver = nid;
-				}
-			}
-		}
-
-		if (dr) {
-			definegereplaced = 1;
-		}
-		while ((*rp = *ver)) {
-			++rp; ++ver;
-		}
-	}
+			// continue with extending the subId, if there's still something to parse
+		} while(islabchar(*lp));
+	} // while(*lp)
 	// add line terminator to the output buffer
 	*rp = 0;
 	if (strlen(nl) > LINEMAX - 1) {
@@ -523,26 +538,33 @@ char* ReplaceDefine(char* lp) {
 	return NULL;
 }
 
-void ParseLabel() {
-	char* tp, temp[LINEMAX], * ttp;
-	aint val, oval;
-	if (White()) {
-		return;
+void SetLastParsedLabel(const char* label) {
+	if (LastParsedLabel) free(LastParsedLabel);
+	if (nullptr != label) {
+		LastParsedLabel = STRDUP(label);
+		if (nullptr == LastParsedLabel) Error("No enough memory!", NULL, FATAL);
+		LastParsedLabelLine = CompiledCurrentLine;
+	} else {
+		LastParsedLabel = nullptr;
+		LastParsedLabelLine = 0;
 	}
-	if (Options::IsPseudoOpBOF && ParseDirective(true)) return;
-	tp = temp;
+}
+
+void ParseLabel() {
+	if (White()) return;
+	if (Options::syx.IsPseudoOpBOF && ParseDirective(true)) return;
+	char temp[LINEMAX], * tp = temp, * ttp;
+	aint val, oval;
 	while (*lp && !White() && *lp != ':' && *lp != '=') {
 		*tp = *lp; ++tp; ++lp;
 	}
 	*tp = 0;
-	if (*lp == ':') {
-		++lp;
-	}
+	if (*lp == ':') ++lp;
 	tp = temp;
 	SkipBlanks();
 	IsLabelNotFound = 0;
 	if (isdigit((unsigned char) * tp)) {
-		if (NeedEQU() || NeedDEFL() || NeedField()) {
+		if (NeedEQU() || NeedDEFL()) {
 			Error("Number labels only allowed as address labels");
 			return;
 		}
@@ -551,29 +573,17 @@ void ParseLabel() {
 			Error("Local-labels flow differs in this pass (missing/new local label or final pass source difference)");
 		}
 	} else {
-		bool IsDEFL = 0;
-		if (NeedEQU()) {
+		if (isMacroNext()) {
+			SetLastParsedLabel(tp);	// store raw label into "last parsed" without adding module/etc
+			return;					// and don't add it to labels table at all
+		}
+		bool IsDEFL = NeedDEFL(), IsEQU = NeedEQU();
+		if (IsDEFL || IsEQU) {
 			if (!ParseExpression(lp, val)) {
-				Error("Expression error", lp); val = 0;
+				Error("Expression error", lp);
+				val = 0;
 			}
-			if (IsLabelNotFound) {
-				Error("Forward reference", NULL, EARLY);
-			}
-		} else if (NeedDEFL()) {
-			if (!ParseExpression(lp, val)) {
-				Error("Expression error", lp); val = 0;
-			}
-			if (IsLabelNotFound) {
-				Error("Forward reference", NULL, EARLY);
-			}
-			IsDEFL = 1;
-		} else if (NeedField()) {
-			aint nv;
-			val = AddressOfMAP;
-			if (ParseExpressionNoSyntaxError(lp, nv)) AddressOfMAP += nv;
-			if (IsLabelNotFound) {
-				Error("Forward reference", NULL, EARLY);
-			}
+			if (IsLabelNotFound) Error("Forward reference", NULL, EARLY);
 		} else {
 			int gl = 0;
 			char* p = lp,* n;
@@ -592,18 +602,9 @@ void ParseLabel() {
 			return;
 		}
 		// Copy label name to last parsed label variable
-		if (!IsDEFL) {
-			if (LastParsedLabel != NULL) {
-				free(LastParsedLabel);
-				LastParsedLabel = NULL;
-			}
-			LastParsedLabel = STRDUP(tp);
-			if (LastParsedLabel == NULL) {
-				Error("No enough memory!", NULL, FATAL);
-			}
-		}
+		if (!IsDEFL) SetLastParsedLabel(tp);
 		if (pass == LASTPASS) {
-			if (IsDEFL && !LabelTable.Insert(tp, val, false, IsDEFL)) {
+			if (IsDEFL && !LabelTable.Insert(tp, val, false, IsDEFL, IsEQU)) {
 				Error("Duplicate label", tp, PASS3);
 			}
 			if (!GetLabelValue(ttp, oval)) {
@@ -618,12 +619,11 @@ void ParseLabel() {
 
 				delete[] buf;
 			}
-		} else if (pass == 2 && !LabelTable.Insert(tp, val, false, IsDEFL) && !LabelTable.Update(tp, val)) {
+		} else if (pass == 2 && !LabelTable.Insert(tp, val, false, IsDEFL, IsEQU) && !LabelTable.Update(tp, val)) {
 			Error("Duplicate label", tp, EARLY);
-		} else if (pass == 1 && !LabelTable.Insert(tp, val, false, IsDEFL)) {
+		} else if (pass == 1 && !LabelTable.Insert(tp, val, false, IsDEFL, IsEQU)) {
 			Error("Duplicate label", tp, EARLY);
 		}
-
 		delete[] tp;
 	}
 }
@@ -662,12 +662,12 @@ unsigned char win2dos[] = //taken from HorrorWord %)))
 //#define DEBUG_COUT_PARSE_LINE
 
 void ParseLine(bool parselabels) {
+	++CompiledCurrentLine;
 	if (!RepeatStack.empty()) {
 		SRepeatStack& dup = RepeatStack.top();
 		if (!dup.IsInWork) {
 			lp = line;
 			CStringsList* f = new CStringsList(lp);
-			f->sourceLine = CurrentSourceLine;
 			dup.Pointer->next = f;
 			dup.Pointer = f;
 #ifdef DEBUG_COUT_PARSE_LINE
@@ -675,7 +675,6 @@ void ParseLine(bool parselabels) {
 					(!RepeatStack.empty() && RepeatStack.top().IsInWork ? '!' : '.'),RepeatStack.size(),
 					(!RepeatStack.empty() ? RepeatStack.top().Level : 0), line);
 #endif
-			++CompiledCurrentLine;
 			ParseDirective_REPT();
 			return;
 		}
@@ -685,12 +684,16 @@ void ParseLine(bool parselabels) {
 			(!RepeatStack.empty() && RepeatStack.top().IsInWork ? '!' : '.'), RepeatStack.size(),
 			(!RepeatStack.empty() ? RepeatStack.top().Level : 0), line);
 #endif
-	++CompiledCurrentLine;
 	lp = ReplaceDefine(line);
 
 #ifdef DEBUG_COUT_PARSE_LINE
 	fprintf(stderr,"rdOut [%s]->[%s] %ld\n", line, lp, comlin);
 #endif
+
+	// update current address by memory wrapping, current page, etc... (before the label is defined)
+	if (DeviceID)	Device->CheckPage(CDevice::CHECK_NO_EMIT);
+	else			CheckRamLimitExceeded();
+	ListAddress = CurAddress;
 
 	if (!ConvertEncoding) {
 		unsigned char* lp2 = (unsigned char*) lp;

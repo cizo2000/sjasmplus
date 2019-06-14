@@ -1,0 +1,125 @@
+# file opened: label_as_name.asm
+ 1    0000                  ;; classic syntax (name is after MACRO directive)
+ 2    0000                  MACRO   classicNameNoArg
+ 3    0000 ~                    dz  "classic-no-arg\n"
+ 4    0000                  ENDM
+ 5    0000                  MACRO   classicNameOneArg arg1?
+ 6    0000 ~                    db  "classic-1-arg: ", arg1?, "\n", 0
+ 7    0000                  ENDM
+ 8    0000                  MACRO   classicNameTwoArg arg1?, arg2?
+ 9    0000 ~                    db  "classic-2-arg: ", arg1?, arg2?, "\n", 0
+10    0000                  ENDM
+11    0000
+12    0000                  ;; new optional syntax (label on MACRO line is used as macro name)
+13    0000              newNameNoArg    MACRO
+14    0000 ~                                dz  "new-no-arg\n"
+15    0000                              ENDM
+16    0000              newNameOneArg   MACRO  arg1?
+17    0000 ~                                db  "new-1-arg: ", arg1?, "\n", 0
+18    0000                              ENDM
+19    0000              newNameTwoArg   MACRO  arg1?, arg2?
+20    0000 ~                                db  "new-1-arg: ", arg1?, arg2?, "\n", 0
+21    0000                              ENDM
+22    0000
+23    0000                  ;; but label doesn't work over colon separator
+24    0000              Label
+24    0000                  MACRO nameOrArg?
+25    0000 ~                                dz  "name-or-arg as name\n"
+26    0000                              ENDM
+27    0000
+28    0000                  ;; DEFL labels also don't work, even without colon
+29    0000              Babel = 2       MACRO nameOrArg2?
+30    0000 ~                                dz  "name-or-arg2 as name\n"
+31    0000                              ENDM
+32    0000
+33    0000                  MODULE module1  ; first version did use "module1" as part of macro name - now fixed+tested
+34    0000
+35    0000              newInModule     MACRO arg1?
+36    0000 ~                                db "in-module-new-1-arg: ", arg1?, "\n", 0
+37    0000                              ENDM
+38    0000
+39    0000                              MACRO classicInModule arg1?
+40    0000 ~                                db "in-module-classic-1-arg: ", arg1?, "\n", 0
+41    0000                              ENDM
+42    0000
+43    0000                  ENDMODULE
+44    0000
+45    0000                  OUTPUT "label_as_name.bin"      ; verify defined macros (by checking bin output)
+46    0000                  classicNameNoArg
+46    0000 63 6C 61 73 >        dz  "classic-no-arg\n"
+46    0004 73 69 63 2D >
+46    0008 6E 6F 2D 61 >
+46    000C 72 67 0A 00 >
+46    0010                classicNameOneArg 'a'
+46    0010 63 6C 61 73 >        db  "classic-1-arg: ", 'a' , "\n", 0
+46    0014 73 69 63 2D >
+46    0018 31 2D 61 72 >
+46    001C 67 3A 20 61 >
+46    0020 0A 00       >
+46    0022                classicNameTwoArg 'b', 'c'
+46    0022 63 6C 61 73 >        db  "classic-2-arg: ", 'b', 'c', "\n", 0
+46    0026 73 69 63 2D >
+46    002A 32 2D 61 72 >
+46    002E 67 3A 20 62 >
+46    0032 63 0A 00    >
+47    0035                  newNameNoArg
+47    0035 6E 65 77 2D >                    dz  "new-no-arg\n"
+47    0039 6E 6F 2D 61 >
+47    003D 72 67 0A 00 >
+47    0041                newNameOneArg 'a'
+47    0041 6E 65 77 2D >                    db  "new-1-arg: ", 'a' , "\n", 0
+47    0045 31 2D 61 72 >
+47    0049 67 3A 20 61 >
+47    004D 0A 00       >
+47    004F                newNameTwoArg 'b', 'c'
+47    004F 6E 65 77 2D >                    db  "new-1-arg: ", 'b', 'c', "\n", 0
+47    0053 31 2D 61 72 >
+47    0057 67 3A 20 62 >
+47    005B 63 0A 00    >
+48    005E                  nameOrArg?
+48    005E 6E 61 6D 65 >                    dz  "name-or-arg as name\n"
+48    0062 2D 6F 72 2D >
+48    0066 61 72 67 20 >
+48    006A 61 73 20 6E >
+48    006E 61 6D 65 0A >
+48    0072 00          >
+48    0073                nameOrArg2?
+48    0073 6E 61 6D 65 >                    dz  "name-or-arg2 as name\n"
+48    0077 2D 6F 72 2D >
+48    007B 61 72 67 32 >
+48    007F 20 61 73 20 >
+48    0083 6E 61 6D 65 >
+48    0087 0A 00       >
+49    0089                  newInModule 'm'
+49    0089 69 6E 2D 6D >                    db "in-module-new-1-arg: ", 'm' , "\n", 0
+49    008D 6F 64 75 6C >
+49    0091 65 2D 6E 65 >
+49    0095 77 2D 31 2D >
+49    0099 61 72 67 3A >
+49    009D 20 6D 0A 00 >
+49    00A1                classicInModule 'M'
+49    00A1 69 6E 2D 6D >                    db "in-module-classic-1-arg: ", 'M', "\n", 0
+49    00A5 6F 64 75 6C >
+49    00A9 65 2D 63 6C >
+49    00AD 61 73 73 69 >
+49    00B1 63 2D 31 2D >
+49    00B5 61 72 67 3A >
+49    00B9 20 4D 0A 00 >
+50    00BD
+51    00BD                  ;; invalid macro names
+label_as_name.asm(52): error: [MACRO] Illegal macroname
+52    00BD                              MACRO @invalidClassic   ; no need for "ENDM" due to error
+label_as_name.asm(53): error: [MACRO] Illegal macroname
+53    00BD              @invalidNew     MACRO
+54    00BD
+label_as_name.asm(55): error: [MACRO] Illegal macroname
+55    00BD                              MACRO #invalidClassic2 arg1?    ; no need for "ENDM" due to error
+label_as_name.asm(56): error: [MACRO] Illegal macroname
+56    00BD              #invalidNew2    MACRO arg1?
+57    00BD
+# file closed: label_as_name.asm
+
+Value    Label
+------ - -----------------------------------------------------------
+0x0000 X Label
+0x0002 X Babel

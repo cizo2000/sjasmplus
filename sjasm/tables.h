@@ -41,30 +41,35 @@ extern char* PreviousIsLabel;
 int GetLabelValue(char*& p, aint& val);
 int GetLocalLabelValue(char*& op, aint& val);
 
+constexpr int LABEL_PAGE_UNDEFINED = -1;
+constexpr int LABEL_PAGE_ROM = 0x7F00;			// must be minimum of special values (but positive)
+
 class CLabelTableEntry {
 public:
-	char* name;
-	char page;
-	bool IsDEFL;
-	unsigned char forwardref;
-	aint value;
-	char used;
-	int updatePass;	// last updated in pass
+	char*	name;
+	aint	value;
+	int		updatePass;	// last update was in pass
+	short	page;
+	bool	IsDEFL;
+	bool	IsEQU;
+	bool	used;
 	CLabelTableEntry();
+	void ClearData();
 };
 
 class CLabelTable {
 public:
 	CLabelTable();
-	int Insert(const char*, aint, bool, bool);
+	int Insert(const char* nname, aint nvalue, bool undefined = false, bool IsDEFL = false, bool IsEQU = false);
 	int Update(char*, aint);
-	int GetValue(char*, aint&);
-	int Find(char*);
-	int Remove(char*);
-	int IsUsed(char*);
+	int GetValue(char* nname, aint& nvalue);
+	CLabelTableEntry* Find(const char* name, bool onlyDefined = false);
+	bool Remove(const char* name);
+	bool IsUsed(const char* name);
 	void RemoveAll();
 	void Dump();
 	void DumpForUnreal();
+	void DumpForCSpect();
 	void DumpSymbols();
 private:
 	int HashTable[LABTABSIZE], NextLocation;
@@ -83,10 +88,9 @@ public:
 	CFunctionTable();
 	int Insert(const char*, void(*) (void));
 	int insertd(const char*, void(*) (void));
-	/*int zoek(char*);*/
 	int zoek(const char*);
 	int Find(char*);
-private:
+private:	//FIXME LABTABSIZE should be probably FUNTABSIZE here, but afraid to fix (rather use regular C++ facilities later)
 	int HashTable[LABTABSIZE], NextLocation;
 	CFunctionTableEntry funtab[LABTABSIZE];
 	int Hash(const char*);
@@ -133,11 +137,7 @@ public:
 	char* string;
 	CStringsList* next;
 	int sourceLine;
-	CStringsList() {
-		string = NULL;
-		next = NULL;
-		sourceLine = 0;
-	}
+	CStringsList() : string(NULL), next(NULL), sourceLine(0) {}
 	~CStringsList() {
 		if (string) free(string);
 		if (next) delete next;
@@ -151,6 +151,7 @@ public:
 	CStringsList* nss;
 	CDefineTableEntry* next;
 	CDefineTableEntry(const char*, const char*, CStringsList*, CDefineTableEntry*);
+	~CDefineTableEntry();
 };
 
 class CMacroDefineTable {
@@ -164,19 +165,9 @@ public:
 	CMacroDefineTable() {
 		Init();
 	}
+	CMacroDefineTable(const CMacroDefineTable&) = delete;
+	CMacroDefineTable& operator=(CMacroDefineTable const&) = delete;
 private:
-	// By Antipod: http://zx.pk.ru/showpost.php?p=159487&postcount=264
-	enum
-	{
-		KDelimiter = '_',
-		KTotalJoinedParams = 64
-	};
-	void SplitToArray( const char* aName, char**& aArray, int& aCount, int* aPositions ) const;
-	int	Copy( char* aDest, int aDestPos, const char* aSource, int aSourcePos, int aBytes ) const;
-	void FreeArray( char** aArray, int aCount );
-	char tempBuf[ LABMAX ];	// for 'arg_someLabel_arg_anotherLabel' expansion
-	// --
-
 	int used[128];
 	CDefineTableEntry* defs;
 };
@@ -195,6 +186,9 @@ public:
 	CDefineTable() {
 		Init();
 	}
+	~CDefineTable();
+	CDefineTable(const CDefineTable&) = delete;
+	CDefineTable& operator=(CDefineTable const & defTable);
 private:
 	CDefineTableEntry* defs[128];
 };
@@ -254,7 +248,7 @@ public:
 	void CopyMember(CStructureEntry2*, aint);
 	void CopyMembers(CStructure*, char*&);
 	void deflab();
-	void emitlab(char*);
+	void emitlab(char* iid, aint address);
 	void emitmembs(char*&);
 	CStructure* next;
 	CStructure(char*, char*, int, int, int, CStructure*);
@@ -274,6 +268,7 @@ public:
 	int FindDuplicate(char*);
 	int Emit(char*, char*, char*&, int);
 private:
+	static aint ParseDesignedAddress(char* &p);
 	CStructure* strs[128];
 };
 
@@ -293,49 +288,6 @@ struct SConditionalStack {
 	bool IsInWork;
 	int Level;
 };
-
-class CDevicePage {
-public:
-	CDevicePage(aint, aint /*, CDevicePage **/);
-	~CDevicePage();
-	aint Size;
-	aint Number;
-	char *RAM;
-	//CDevicePage* Next;
-private:
-};
-
-class CDeviceSlot {
-public:
-	CDeviceSlot(aint, aint, aint /*, CDeviceSlot **/);
-	~CDeviceSlot();
-	aint Address;
-	aint Size;
-	CDevicePage* Page;
-	aint Number;
-	//CDeviceSlot* Next;
-private:
-};
-
-class CDevice {
-public:
-	CDevice(const char *, CDevice *);
-	~CDevice();
-	void AddSlot(aint adr, aint size);
-	void AddPage(aint size);
-	CDevicePage* GetPage(aint);
-	CDeviceSlot* GetSlot(aint);
-	char* ID;
-	CDevice* Next;
-	int CurrentSlot;
-	int CurrentPage;
-	int SlotsCount;
-	int PagesCount;
-private:
-	CDeviceSlot* Slots[256];
-	CDevicePage* Pages[256];
-};
-
 
 int LuaGetLabel(char *name);
 

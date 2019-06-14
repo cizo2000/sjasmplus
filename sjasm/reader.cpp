@@ -112,27 +112,51 @@ int NeedDEFL() {
 	return 0;
 }
 
-int NeedField() {
-	char* olp = lp;
+bool NeedIoC() {
 	SkipBlanks();
-	if (*lp == '#') {
-		++lp; return 1;
-	}
-	if (*lp == '.') {
-		++lp;
-	}
-	if (cmphstr(lp, "field")) {
-		return 1;
-	}
-	lp = olp;
-	return 0;
+	if ('(' != lp[0] || 'c' != tolower(lp[1]) || ')' != lp[2]) return false;
+	lp += 3;
+	return true;
 }
 
-int comma(char*& p) {
+bool isMacroNext() {	// checks if ".macro" directive is ahead (but doesn't consume it)
+	if (SkipBlanks()) return false;
+	char* p = lp;
+	if ('.' == *p) ++p;
+	return cmphstr(p, "macro");
+}
+
+bool anyComma(char*& p) {
 	SkipBlanks(p);
-	if (*p != ',') return 0;
+	if (*p != ',') return false;
 	++p;
-	return 1;
+	return true;
+}
+
+bool comma(char*& p) {
+	SkipBlanks(p);
+	if (',' != p[0] || ',' == p[1]) return false;	// detect double-comma as FALSE state
+	++p;
+	return true;
+}
+
+bool doubleComma(char* & p) {
+	SkipBlanks(p);
+	if (',' != p[0] || ',' != p[1]) return false;
+	p += 2;
+	return true;
+}
+
+bool doubleBacktick(char* & p) {
+	SkipBlanks(p);
+	if ('`' != p[0] || '`' != p[1]) return false;
+	p += 2;
+	return true;
+}
+
+bool nonMaComma(char* & p) {
+	if (Options::syx.isMultiArgPlainComma()) return false;	// comma is also multi-arg => FALSE here
+	return comma(p);
 }
 
 //enum EBracketType          { BT_NONE, BT_ROUND, BT_CURLY, BT_SQUARE, BT_COUNT };
@@ -143,6 +167,8 @@ static int expectedAddressClosingBracket = -1;
 // memory-address bracket opener (only "(" and "[" types supported)
 EBracketType OpenBracket(char*& p) {
 	SkipBlanks(p);
+	if (2 == Options::syx.MemoryBrackets && brackets_b[BT_ROUND] == *p) return BT_NONE;		// disabled "()"
+	if (1 == Options::syx.MemoryBrackets && brackets_b[BT_SQUARE] == *p) return BT_NONE;	// disabled "[]"
 	for (const EBracketType bt : {BT_ROUND, BT_SQUARE}) {
 		if (brackets_b[bt] == *p) {
 			expectedAddressClosingBracket = brackets_e[bt];
@@ -162,78 +188,63 @@ int CloseBracket(char*& p) {
 	return 1;
 }
 
-int cpc = '4';
-
-/* not modified */
-int oparenOLD(char*& p, char c) {
-	SkipBlanks(p);
-	if (*p != c) {
-		return 0;
-	}
-	if (c == '[') {
-		cpc = ']';
-	}
-	if (c == '(') {
-		cpc = ')';
-	}
-	if (c == '{') {
-		cpc = '}';
-	}
-	++p; return 1;
-}
-
-int cparenOLD(char*& p) {
-	SkipBlanks(p);
-	if (*p != cpc) {
-		return 0;
-	}
-	++p; return 1;
-}
-
-char* getparen(char* p) {
-	int teller = 0;
-	SkipBlanks(p);
-	while (*p) {
-		if (*p == '(') {
-			++teller;
-		} else if (*p == ')') {
-			if (teller == 1) {
-				SkipBlanks(++p); return p;
-			} else {
-				--teller;
-			}
+char* ParenthesesEnd(char* p) {
+	int depth = 0;	char pc;
+	if (SkipBlanks(p) || '(' != *p) return nullptr;
+	while (0 != (pc = *p++)) {
+		if ('(' == pc) ++depth;
+		else if (')' == pc && 0 == --depth) {
+			SkipBlanks(p);
+			return p;
 		}
-		++p;
 	}
-	return 0;
+	return nullptr;
 }
 
-char nidtemp[LINEMAX];
+char nidtemp[LINEMAX], *nidsubp = nidtemp;
 
 char* GetID(char*& p) {
-	/*char nid[LINEMAX],*/ char* np;
-	np = nidtemp;
-	SkipBlanks(p);
-	//if (!isalpha(*p) && *p!='_') return 0;
-	if (*p && !isalpha((unsigned char) * p) && *p != '_' && *p != '.') {
-		return 0;
-	}
-	while (*p) {
-		if (!isalnum((unsigned char) * p) && *p != '_' && *p != '.' && *p != '?' && *p != '!' && *p != '#' && *p != '@') {
-			break;
-		}
-		*np = *p; ++p; ++np;
-	}
+	char* np = nidtemp;
+	if (SkipBlanks(p) || (!isalpha((unsigned char) * p) && *p != '_' && *p != '.')) return NULL;
+	while (islabchar((unsigned char) * p)) *np++ = *p++;
 	*np = 0;
-	/*return STRDUP(nid);*/
+	return nidtemp;
+}
+
+void ResetGrowSubId() {
+	nidsubp = nidtemp;			// reset temporary ID, starting new one
+	*nidsubp = 0;
+}
+
+char* GrowSubId(char* & p) {	// appends next part of ID
+	// The caller function ReplaceDefineInternal already assures the first char of ID is (isalpha() || '_')
+	// so there are no extra tests here to verify validity of first character (like GetID(..) must do)
+	if ('_' == *p) {
+		// add sub-parts delimiter in separate step (i.e. new ID grows like: "a", "a_", "a_b", ...
+		while ('_' == *p) *nidsubp++ = *p++;
+	} else while (*p && (isalnum(*p) || '.' == *p || '?' == *p || '!' == *p || '#' == *p || '@' == *p)) {
+		// add sub-part of id till next underscore
+		*nidsubp++ = *p++;
+	}
+	if (nidtemp+LINEMAX <= nidsubp) Error("ID too long, buffer overflow detected.", NULL, FATAL);
+	*nidsubp = 0;
+	if (!nidtemp[0]) return NULL;	// result is empty string, return NULL rather
+	return nidtemp;
+}
+
+char* GrowSubIdByExtraChar(char* & p) {	// append the next char even if not a legal label/ID char
+	// the caller function is responsible for all the validation, this just adds single char
+	*nidsubp++ = *p++;
+	if (nidtemp+LINEMAX <= nidsubp) Error("ID too long, buffer overflow detected.", NULL, FATAL);
+	*nidsubp = 0;
+	if (!nidtemp[0]) return NULL;	// result is empty string, return NULL rather
 	return nidtemp;
 }
 
 char instrtemp[LINEMAX];
 
 char* getinstr(char*& p) {
-	/*char nid[LINEMAX],*/ char* np;
-	np = instrtemp;
+	char* np = instrtemp;
 	SkipBlanks(p);
 	if (!isalpha((unsigned char) * p) && *p != '.') {
 		return 0;
@@ -247,7 +258,11 @@ char* getinstr(char*& p) {
 		*np = *p; ++p; ++np;
 	}
 	*np = 0;
-	/*return STRDUP(nid);*/
+	if (!Options::syx.CaseInsensitiveInstructions) return instrtemp;
+	// lowercase the retrieved "instruction" string when option "--syntax=i" is used
+	while (instrtemp <= --np) {
+		*np = tolower(*np);
+	}
 	return instrtemp;
 }
 
@@ -265,7 +280,7 @@ int check8o(long val) {
 	if (val < -128 || val > 127) {
 		char buffer[32];
 		sprintf(buffer,"Offset out of range (%+li)", val);
-		Error(buffer);
+		Error(buffer, nullptr, IF_FIRST);
 		return 0;
 	}
 	return 1;
@@ -386,17 +401,18 @@ bool GetNumericValue_TwoBased(char*& p, const char* const pend, aint& val, const
 	const int base = 1<<shiftBase;
 	const aint overflowMask = (~0UL)<<(32-shiftBase);
 	while (p < pend) {
-		if (0 == *p || !isalnum(*p)) {
+		const char charDigit = *p++;
+		if ('\'' == charDigit && isalnum(*p)) continue;
+		if (0 == charDigit || !isalnum(charDigit)) {
 			getNumericValueLastErr = getNumericValueErr_no_digit;
 			break;
 		}
-		if (base <= (digit = getval(*p))) {
+		if (base <= (digit = getval(charDigit))) {
 			getNumericValueLastErr = getNumericValueErr_digit;
 			break;
 		}
 		if (val & overflowMask) getNumericValueLastErr = getNumericValueErr_overflow;
 		val = (val<<shiftBase) + digit;
-		++p;
 	}
 	val &= 0xFFFFFFFFUL;
 	return (NULL == getNumericValueLastErr);
@@ -412,18 +428,19 @@ bool GetNumericValue_IntBased(char*& p, const char* const pend, aint& val, const
 	}
 	aint digit;
 	while (p < pend) {
-		if (0 == *p || !isalnum(*p)) {
+		const char charDigit = *p++;
+		if ('\'' == charDigit && isalnum(*p)) continue;
+		if (0 == charDigit || !isalnum(charDigit)) {
 			getNumericValueLastErr = getNumericValueErr_no_digit;
 			break;
 		}
-		if (base <= (digit = getval(*p))) {
+		if (base <= (digit = getval(charDigit))) {
 			getNumericValueLastErr = getNumericValueErr_digit;
 			break;
 		}
 		const unsigned long oval = static_cast<unsigned long>(val)&0xFFFFFFFFUL;
 		val = (val * base) + digit;
 		if (static_cast<unsigned long>(val&0xFFFFFFFFUL) < oval) getNumericValueLastErr = getNumericValueErr_overflow;
-		++p;
 	}
 	val &= 0xFFFFFFFFUL;
 	return (NULL == getNumericValueLastErr);
@@ -436,7 +453,12 @@ int GetConstant(char*& op, aint& val) {
 	// the input string has been already detected as numeric literal by ParseExpPrim (assert)
 	if (!isdigit(*op) && '#' != *op && '$' != *op && '%' != *op) ExitASM(32);
 #endif
-	// check if the format is defined by prefix (#, $, %, 0x, 0X)
+	// find end of the numeric literal (pointer is beyond last alfa/digit character
+	char* pend = op;
+	if ('#' == *pend || '$' == *pend || '%' == *pend) ++pend;
+	while (isalnum(*pend) || ('\'' == *pend && isalnum(pend[1]))) ++pend;
+	char* const hardEnd = pend;
+	// check if the format is defined by prefix (#, $, %, 0x, 0X, 0b, 0B, 0q, 0Q)
 	char* p = op;
 	int shiftBase = 0, base = 0;
 	if ('#' == *p || '$' == *p) {
@@ -445,14 +467,16 @@ int GetConstant(char*& op, aint& val) {
 	} else if ('0' == p[0] && 'x' == (p[1]|0x20)) {
 		shiftBase = 4;
 		p += 2;
+	} else if ('0' == p[0] && 'b' == (p[1]|0x20) && 'h' != (pend[-1]|0x20) ) {
+		shiftBase = 1;		// string 0b800h is hexadecimal, not binary (legacy compatibility)
+		p += 2;
+	} else if ('0' == p[0] && 'q' == (p[1]|0x20)) {
+		shiftBase = 3;
+		p += 2;
 	} else if ('%' == *p) {
 		shiftBase = 1;
 		++p;
 	}
-	// find end of the numeric literal (pointer is beyond last alfa/digit character
-	char* pend = p;
-	while (isalnum(*pend)) ++pend;
-	char* const hardEnd = pend;
 	// if the base is still undecided, check for suffix format specifier
 	if (0 == shiftBase) {
 		switch (pend[-1]|0x20) {
@@ -465,6 +489,10 @@ int GetConstant(char*& op, aint& val) {
 				base = 10;
 				break;
 		}
+	}
+	if ('\'' == *p || '\'' == pend[-1]) {	// digit-group tick can't be first/last digit
+		Error(getNumericValueErr_no_digit, op, SUPPRESS);
+		return 0;
 	}
 	// parse the number into value
 	if (0 < shiftBase) {
@@ -601,35 +629,36 @@ int GetBytes(char*& p, int e[], int add, int dc) {
 	int t = 0, strRes;
 	do {
 		const int oldT = t;
+		char* const oldP = p;
 		if (SkipBlanks(p)) {
 			Error("Expression expected", NULL, SUPPRESS);
+			break;
 		} else if (0 != (strRes = GetCharConstAsString(p, e, t, 128, add))) {
 			// string literal parsed (both types)
-			if (-1 == strRes) break;
-			if (oldT == t) Warning("Empty string", p-2);
-			else {
-				// single byte "strings" may have further part of expression, handle it *here* :/
-				if (1 == t - oldT) {
-					SkipBlanks(p);
-					if (*p && ',' != *p) {
-						ParseExpression(p, val);
-						val += (e[t - 1] - add) & 255;	// restore "char" value back and add to expr.
-						check8(val);
-						e[t-1] = (val + add) & 255;
-					}
+			if (-1 == strRes) break;		// syntax error happened
+			// single byte "strings" may have further part of expression, detect it here
+			if (1 == t - oldT && !SkipBlanks(p) && ',' != *p) {
+				// expression with single char detected (like 'a'|128), revert the string parsing
+				t = oldT;
+				p = oldP;		// and continue with the last code-path trying to parse expression
+			} else {	// string literal (not expression), handle the extra string literal logic
+				if (oldT == t) {
+					Warning("Empty string", p-2);
+				} else if (dc) {
+					// mark last "string" byte with |128: single char in quotes *is* string
+					// but single char in apostrophes *is not* (!) (no |128 then)
+					int maxLengthNotString = (1 == strRes);		// 0 for quotes, 1 for apostrophes
+					if (maxLengthNotString < (t - oldT)) e[t - 1] |= 128;
 				}
-				// mark last "string" byte with |128: single char in "" *is* string
-				// but single char in '' *is not* (!) (no |128 then) => a bit complex condition :)
-				if (dc && ((1 == strRes) < (t - oldT))) e[t - 1] |= 128;
+				continue;
 			}
+		}
+		if (ParseExpression(p, val)) {
+			check8(val);
+			e[t++] = (val + add) & 255;
 		} else {
-			if (ParseExpression(p, val)) {
-				check8(val);
-				e[t++] = (val + add) & 255;
-			} else {
-				Error("Syntax error", p, SUPPRESS);
-				break;
-			}
+			Error("Syntax error", p, SUPPRESS);
+			break;
 		}
 	} while(comma(p) && t < 128);
 	e[t] = -1;
@@ -743,7 +772,7 @@ char* GetFileName(char*& p, bool convertslashes) {
 			++p;
 		} else {
 			const char delimiterTxt[2] = { deliE, 0 };
-			Error("No closing delimiter", delimiterTxt, EARLY);
+			Error("No closing delimiter", delimiterTxt, SUPPRESS);
 		}
 	}
 	SkipBlanks(p);			// skip blanks any way
